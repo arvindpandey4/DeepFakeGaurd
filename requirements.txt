@@ -1,0 +1,11 @@
+tensorflow>=2.10.0
+keras>=2.10.0
+opencv-python>=4.7.0
+numpy>=1.23.0
+matplotlib>=3.6.0
+pillow>=9.3.0
+tqdm>=4.64.0
+huggingface_hub>=0.19.0
+fastapi>=0.100.0
+uvicorn>=0.20.0
+python-multipart>=0.0.6
