@@ -1,204 +1,145 @@
-# Multi-Stage Adaptive Inference Pipeline for Deepfake Video Detection
+# 🛡️ DeepFakeGuard
+### Multi-Stage Adaptive Inference Pipeline for Efficient Deepfake Detection
 
-## 🎯 Project Overview
+[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-v0.95.0+-009688.svg)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-v18.0+-61DAFB.svg)](https://reactjs.org/)
+[![IEEE](https://img.shields.io/badge/Research-IEEE%20Format-red.svg)](#-research--visualization)
 
-This project implements an **efficient, adaptive deepfake detection system** that progressively analyzes videos using multiple stages, applying expensive analysis only when necessary.
-
-### The Problem
-Traditional deepfake detection systems process every video with the same computational intensity, wasting resources on obvious cases.
-
-### Our Solution
-A **Multi-Stage Adaptive Inference Pipeline** that:
-- ✅ Quickly filters obvious deepfakes/real videos (Stage 1)
-- ✅ Applies moderate analysis to uncertain cases (Stage 2)
-- ✅ Uses thorough analysis only for the hardest videos (Stage 3)
-
-## 🔑 Key Innovation
-
-**We don't use three different models.**  
-We use **ONE pretrained MesoNet model** with varying:
-- Number of frames processed
-- Input resolution
-- Computation intensity
-
-## 🏗️ Architecture
-
-```
-Input Video
-    ↓
-Stage 1: Fast Inference (Low res, few frames)
-    ↓ (only if uncertain)
-Stage 2: Balanced Inference (Medium res, more frames)
-    ↓ (only if still uncertain)
-Stage 3: Accurate Inference (High res, many frames)
-    ↓
-Final Decision (Deepfake / Real)
-```
-
-## 🚀 Features
-
-- **MesoNet (Meso4)** - Lightweight CNN for deepfake detection
-- **CPU-friendly** - Runs efficiently on standard hardware
-- **Pretrained weights** - Ready to use out of the box
-- **Adaptive processing** - Smart resource allocation
-- **Performance metrics** - Track time savings and accuracy
-
-## 📊 Expected Performance
-
-For 100 videos:
-- ~60% exit at Stage 1 (Fast)
-- ~30% exit at Stage 2 (Balanced)
-- ~10% reach Stage 3 (Accurate)
-
-**Result**: Significant time savings without sacrificing accuracy
-
-## 🛠️ Technology Stack
-
-- **Python 3.8+**
-- **TensorFlow/Keras** - Deep learning framework
-- **OpenCV** - Video processing
-- **NumPy** - Numerical operations
-- **Matplotlib** - Visualization
-
-## 📁 Project Structure
-
-```
-Major Project/
-├── models/
-│   ├── mesonet.py              # MesoNet architecture
-│   └── weights/
-│       └── Meso4_DF.h5         # Pretrained weights
-├── pipeline/
-│   ├── adaptive_pipeline.py    # Multi-stage pipeline
-│   ├── frame_extractor.py      # Video frame extraction
-│   └── config.py               # Configuration settings
-├── utils/
-│   ├── metrics.py              # Performance tracking
-│   └── visualization.py        # Results visualization
-├── demo.py                     # Main demo script
-├── requirements.txt            # Dependencies
-└── README.md                   # This file
-```
-
-## 🎬 Quick Start
-
-### 1. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Download Pretrained Weights
-The MesoNet weights will be automatically downloaded on first run, or manually download from:
-- [DariusAf/MesoNet Repository](https://github.com/DariusAf/MesoNet)
-
-### 3. Run Demo
-```bash
-python demo.py --video path/to/video.mp4
-```
-
-Or test with sample videos:
-```bash
-python demo.py --demo
-```
-
-## 📖 Usage Examples
-
-### Single Video Analysis
-```python
-from pipeline.adaptive_pipeline import AdaptivePipeline
-
-pipeline = AdaptivePipeline()
-result = pipeline.predict("video.mp4")
-
-print(f"Prediction: {result['label']}")
-print(f"Confidence: {result['confidence']:.2%}")
-print(f"Exit Stage: {result['stage']}")
-print(f"Processing Time: {result['time']:.2f}s")
-```
-
-### Batch Processing
-```python
-videos = ["video1.mp4", "video2.mp4", "video3.mp4"]
-results = pipeline.predict_batch(videos)
-
-# View statistics
-pipeline.print_statistics()
-```
-
-## 🎓 What This Project Demonstrates
-
-### ✅ We DO claim:
-- Efficient, practical deepfake detection
-- Adaptive inference scheduling
-- Significant computational savings
-- System-level optimization
-
-### ❌ We DON'T claim:
-- Real-time live detection
-- New deepfake detection model
-- Model training/fine-tuning
-- State-of-the-art accuracy
-
-## 📈 Configuration
-
-Edit `pipeline/config.py` to customize:
-
-```python
-# Stage 1: Fast Inference
-STAGE1_FRAMES_PER_SEC = 1
-STAGE1_RESOLUTION = (64, 64)
-STAGE1_CONFIDENCE_THRESHOLD = 0.85
-
-# Stage 2: Balanced Inference
-STAGE2_FRAMES_PER_SEC = 5
-STAGE2_RESOLUTION = (128, 128)
-STAGE2_CONFIDENCE_THRESHOLD = 0.75
-
-# Stage 3: Accurate Inference
-STAGE3_FRAMES_PER_SEC = 10
-STAGE3_RESOLUTION = (256, 256)
-```
-
-## 🔬 Model Details
-
-**MesoNet (Meso4)**
-- Designed specifically for deepfake detection
-- Trained on FaceForensics++ dataset
-- Lightweight architecture (< 1MB)
-- Fast inference on CPU
-- Focus on mesoscopic properties of images
-
-## 📊 Performance Metrics
-
-The system tracks:
-- **Processing time per stage**
-- **Exit distribution** (% videos per stage)
-- **Average confidence scores**
-- **Total time savings** vs. full processing
-- **Accuracy** (when ground truth available)
-
-## 🤝 Contributing
-
-This is a demo project for educational purposes. Feel free to:
-- Experiment with different thresholds
-- Try other lightweight models
-- Add more stages
-- Implement face detection preprocessing
-
-## 📚 References
-
-- **MesoNet Paper**: "MesoNet: a Compact Facial Video Forgery Detection Network"
-- **Repository**: [DariusAf/MesoNet](https://github.com/DariusAf/MesoNet)
-- **Dataset**: FaceForensics++
-
-## 📝 License
-
-This project is for educational and research purposes.
-
-## 👨‍💻 Author
-
-Arvind - Major Project Demo
+DeepFakeGuard is an **efficient, adaptive deepfake detection system** that intelligently optimizes computational resources. By using a multi-stage approach, it analyzes videos with increasing depth only when necessary, significantly reducing processing time without compromising accuracy.
 
 ---
 
-**Note**: This is a demonstration of adaptive inference scheduling for deepfake detection, not a production-ready system.
+## 📖 Table of Contents
+- [🎯 Project Overview](#-project-overview)
+- [🏗️ Multi-Stage Architecture](#️-multi-stage-architecture)
+- [✨ Key Features](#-key-features)
+- [🖥️ Web Dashboard](#️-web-dashboard)
+- [🔬 Research & Visualization](#-research--visualization)
+- [📁 Project Structure](#-project-structure)
+- [🚀 Quick Start](#-quick-start)
+- [🛠️ Tech Stack](#️-tech-stack)
+- [👨‍💻 Author](#-author)
+
+---
+
+## 🎯 Project Overview
+
+### The Problem
+Traditional deepfake detection systems process every video with the same maximum computational intensity. This wastes significant CPU/GPU resources on "obvious" cases (both real and fake) that could be identified with much lighter analysis.
+
+### Our Solution: Adaptive Inference
+DeepFakeGuard implements a **Multi-Stage Adaptive Inference Pipeline** that:
+1.  **Fast Exit**: Quickly filters obvious videos in Stage 1.
+2.  **Moderate Analysis**: Applies balanced processing to uncertain cases in Stage 2.
+3.  **Deep Inspection**: Uses thorough analysis only for the most challenging videos in Stage 3.
+
+---
+
+## 🏗️ Multi-Stage Architecture
+
+We utilize a single **MesoNet (Meso4)** model but vary the execution intensity across stages:
+
+| Stage | Intensity | Resolution | Frames/Sec | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **Stage 1** | ⚡ Fast | 64x64 | 1 FPS | Optimized for high-confidence, obvious cases. |
+| **Stage 2** | ⚖️ Balanced | 128x128 | 5 FPS | Medium intensity for ambiguous results. |
+| **Stage 3** | 🔍 Accurate | 256x256 | 10 FPS | Full-depth analysis for maximum precision. |
+
+---
+
+## ✨ Key Features
+
+- **Resource Efficient**: Up to **60% faster** processing by exiting early on obvious videos.
+- **Glassmorphism UI**: A stunning, modern web dashboard for real-time visualization.
+- **MesoNet Core**: Leveraging a lightweight CNN specifically designed for facial forgery.
+- **CPU Optimized**: Designed to run efficiently without requiring high-end GPUs.
+- **Detailed Metrics**: Real-time tracking of exit stages, confidence scores, and processing time.
+
+---
+
+## 🖥️ Web Dashboard
+
+The project includes a futuristic, high-performance web interface to interact with the pipeline.
+
+### 🚀 Starting the Web Interface
+
+#### 1. Start the Backend API
+```bash
+# In the root directory (with venv activated)
+python api.py
+```
+*API will be available at: `http://localhost:8000`*
+
+#### 2. Start the Frontend UI
+```bash
+cd frontend
+npm install  # If running for the first time
+npm run dev
+```
+*Dashboard will be available at: `http://localhost:5173`*
+
+---
+
+## 🔬 Research & Visualization
+
+For academic and research purposes, we have included tools to generate IEEE-standard visualizations of the pipeline's performance.
+
+- **Location**: `ieee_paper_files/`
+- **Capability**: Generates "Mean Frames Processed per Video" bar charts comparing the Adaptive approach vs. a Fixed baseline.
+- **Usage**:
+  ```bash
+  python ieee_paper_files/generate_graph_ieee.py
+  ```
+
+---
+
+## 📁 Project Structure
+
+```text
+DeepFakeGuard/
+├── ieee_paper_files/       # 📊 IEEE standard research graphs & scripts
+├── frontend/               # 💻 React + Vite + Tailwind Dashboard
+├── pipeline/               # ⚙️ Core Adaptive Pipeline logic
+│   ├── adaptive_pipeline.py
+│   ├── frame_extractor.py
+│   └── config.py
+├── models/                 # 🧠 CNN Architecture & Weights
+├── utils/                  # 🛠️ Helper functions & Metrics
+├── api.py                  # 🚀 FastAPI Backend
+├── demo.py                 # 🐍 CLI Selection/Demo script
+├── requirements.txt        # 📦 Python Dependencies
+└── README.md               # 📖 Main Documentation
+```
+
+---
+
+## 🚀 Quick Start (CLI Only)
+
+1.  **Install Dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+2.  **Run Sample Analysis**:
+    ```bash
+    python demo.py --demo
+    ```
+
+---
+
+## 🛠️ Tech Stack
+
+- **Backend**: Python, FastAPI, TensorFlow/Keras, OpenCV
+- **Frontend**: React.js, Vite, Tailwind CSS, Framer Motion
+- **Visualization**: Matplotlib, NumPy
+- **Styling**: Modern Glassmorphism & Micro-animations
+
+---
+
+## 👨‍💻 Author
+
+**Arvind**  
+*Major Project - DeepFakeGuard*
+
+---
+> **Disclaimer**: This is a research demonstration project focusing on adaptive inference scheduling for deepfake detection.
