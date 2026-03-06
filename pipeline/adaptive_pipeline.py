@@ -108,37 +108,39 @@ class AdaptivePipeline:
     
     def _predict_frames(self, frames: np.ndarray) -> float:
         """
-        Calculates image-level probabilities and aggregates them
+        Calculates image-level probabilities and aggregates them.
         Equation 3 & 4: p(s) = (1/|Ss|) * sum(pi)
-        
+
+        MesoNet Convention (Meso4_DF.h5):
+            p_i close to 1.0 => frame is REAL
+            p_i close to 0.0 => frame is DEEPFAKE
+
         Args:
             frames: numpy array of processed frames
-            
+
         Returns:
-            average_probability p(s)
+            average_probability p(s)  [high = real, low = deepfake]
         """
-        # Preprocess frames (normalization handled here)
-        # MesoNet expects (256, 256, 3)
+        # Preprocess frames — MesoNet expects (256, 256, 3)
         target_resolution = (256, 256)
         processed_frames = preprocess_frames(frames, target_shape=target_resolution, normalize=True)
-        
-        # Batch inference (Section V.B: p_i = P(y = 1 | f_i))
+
+        # Batch inference
         model = self.model
         if model is None:
             raise RuntimeError("Model used before initialization")
-        
-        # Ensure we use the configured batch size
+
         config_batch_size = int(PIPELINE_CONFIG.get('batch_size', 1))
-        
+
         predictions = model.predict(
-            processed_frames, 
+            processed_frames,
             batch_size=config_batch_size,
             verbose=0
         )
-        
+
         # Aggregate predictions using arithmetic average (Equation 18)
         avg_probability = float(np.mean(predictions))
-        
+
         return avg_probability
     
     def _process_stage(self, 
@@ -170,25 +172,27 @@ class AdaptivePipeline:
         p_s = self._predict_frames(frames)
         
         # Confidence Assessment (Section IV.D: Equation 19)
-        # magnitude = max(p_s, 1 - p_s)
+        # MesoNet convention: p_s >= 0.5 means REAL, p_s < 0.5 means DEEPFAKE
+        # confidence_magnitude measures how far from the 0.5 decision boundary
         confidence_magnitude = max(p_s, 1 - p_s)
-        
+
         stage_time = time.time() - stage_start
-        
+
         # Early termination condition (Section IV.B: Equation 5)
         # Condition: max(p_s, 1 - p_s) >= tau_s
         tau_s = stage_config['confidence_threshold']
         should_exit = (confidence_magnitude >= tau_s) or (stage_number == 3)
-        
+
         # Predicted Class (Equation 6)
-        label = "DEEPFAKE" if p_s >= 0.5 else "REAL"
-        
+        # HIGH p_s (>= 0.5) => REAL  |  LOW p_s (< 0.5) => DEEPFAKE
+        label = "REAL" if p_s >= 0.5 else "DEEPFAKE"
+
         if PIPELINE_CONFIG['verbose']:
             print(f"  p(s) = {p_s:.4f}, Confidence = {confidence_magnitude:.4f}")
             print(f"  Threshold tau_{stage_number} = {tau_s:.2f}")
             print(f"  Decision: {label} ({'EXIT' if should_exit else 'ESCALATE'})")
             print(f"  Compute Time: {stage_time:.2f}s")
-        
+
         return {
             'stage': stage_number,
             'p_s': p_s,
@@ -254,7 +258,7 @@ class AdaptivePipeline:
         print(f"FINAL RESULT")
         print(f"{'='*60}")
         print(f"  Prediction: {f_label}")
-        print(f"  p(s) = {f_p_s:.4f}")
+        print(f"  p(s) = {f_p_s:.4f}  (high=REAL, low=DEEPFAKE)")
         print(f"  Confidence: {f_conf:.4f}")
         print(f"  Exit Stage: {exit_stage}")
         print(f"  Total Time: {total_time:.2f}s")

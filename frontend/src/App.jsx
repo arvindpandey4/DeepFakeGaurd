@@ -628,9 +628,9 @@ function PipelineStep({ number, status, isExit }) {
                     {isExit && <span className="ml-2 text-[10px] bg-cyan-500/20 text-cyan-300 px-2 py-0.5 rounded border border-cyan-500/30 uppercase">Final Decision</span>}
                 </h4>
                 <p className="text-xs text-neutral-500 mt-0.5">
-                    {number === '1' && "Fast Inference • 64px"}
-                    {number === '2' && "Balanced Inference • 128px"}
-                    {number === '3' && "Accurate Inference • 256px"}
+                    {number === '1' && "Fast Inference • 128px • 0.5 fps"}
+                    {number === '2' && "Balanced Inference • 192px • 2 fps"}
+                    {number === '3' && "Accurate Inference • 256px • 5 fps"}
                 </p>
             </div>
         </div>

@@ -205,7 +205,7 @@ async def download_remote_video(request: DownloadRequest):
                         f.write(chunk)
         else:
             # For DEEPFAKE videos: download via HF Hub
-            print(f"Downloading DEEPFAKE from HF: {video_hf_path} to {target_path}")
+            print(f"Downloading {video_type} via HF Hub: {video_hf_path} -> {target_path}")
             path = hf_hub_download(
                 repo_id=video_repo_id,
                 filename=video_hf_path,
