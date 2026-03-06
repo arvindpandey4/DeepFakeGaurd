@@ -4,9 +4,10 @@ Multi-Stage Adaptive Inference Pipeline for Deepfake Detection
 
 import numpy as np # type: ignore
 import time
-from typing import Dict, List, Tuple
 import os
 import sys
+import requests  # type: ignore
+from typing import Dict, List, Tuple, Any, Optional, Union
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,23 +15,22 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from models.mesonet import Meso4, MesoInception4 # type: ignore
 except ImportError:
-    # Fallback for different execution contexts
     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
     from models.mesonet import Meso4, MesoInception4 # type: ignore
 
 try:
-    from .config import ( # type: ignore
-        WEIGHTS_PATH, 
-        PIPELINE_CONFIG, 
-        CLASSIFICATION_CONFIG, 
+    from .config import (
+        WEIGHTS_PATH,
+        PIPELINE_CONFIG,
+        CLASSIFICATION_CONFIG,
         get_stage_config,
         print_config
     )
 except ImportError:
-    from pipeline.config import ( # type: ignore
-        WEIGHTS_PATH, 
-        PIPELINE_CONFIG, 
-        CLASSIFICATION_CONFIG, 
+    from pipeline.config import (
+        WEIGHTS_PATH,
+        PIPELINE_CONFIG,
+        CLASSIFICATION_CONFIG,
         get_stage_config,
         print_config
     )
@@ -39,36 +39,51 @@ try:
     from .frame_extractor import FrameExtractor, preprocess_frames # type: ignore
 except ImportError:
     from pipeline.frame_extractor import FrameExtractor, preprocess_frames # type: ignore
-from typing import Dict, List, Tuple, Any, Optional, Union
-# Remove the tensorflow import if not strictly needed for logic, 
-# or keep it if you need specific types, but meso classes are wrappers.
+
+try:
+    from .frequency_detector import compute_frequency_score  # type: ignore
+except ImportError:
+    from pipeline.frequency_detector import compute_frequency_score  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# Ensemble weights: how much to trust each signal
+# ---------------------------------------------------------------------------
+_SPATIAL_WEIGHT    = 0.70   # MesoNet CNN spatial score
+_FREQUENCY_WEIGHT  = 0.30   # FFT frequency-domain score
+
+# URL for the more accurate MesoInception4 weights (official MesoNet repo)
+_INCEPTION_WEIGHTS_URL = (
+    "https://github.com/DariusAf/MesoNet/raw/master/weights/MesoInception4_DF.h5"
+)
 
 
 class AdaptivePipeline:
     """
-    Multi-Stage Adaptive Inference Pipeline
-    
-    Progressively analyzes videos using three stages:
-    1. Fast Inference: Low resolution, few frames
-    2. Balanced Inference: Medium resolution, more frames
-    3. Accurate Inference: High resolution, many frames
-    
-    Videos exit early if confidence is high enough.
+    Multi-Stage Adaptive Inference Pipeline — Enhanced Edition
+
+    Improvements over the baseline:
+      1. MesoInception4 architecture (auto-downloaded on first run) — more
+         accurate than Meso4, uses Inception modules for multi-scale features.
+      2. Frequency-domain ensemble — FFT-based GAN artifact detector runs in
+         parallel with MesoNet and is blended into the final score (30%).
+      3. Test-Time Augmentation (TTA) — each batch is also run on horizontally
+         flipped frames; scores are averaged, reducing prediction variance.
+      4. Trimmed-mean aggregation — top/bottom 15% frame scores are discarded
+         before averaging, preventing outlier frames from dominating.
+      5. Unsharp-mask sharpening — applied before model inference to expose
+         GAN blending seams that normal pixel averages smooth away.
     """
-    
-    def __init__(self, weights_path: Optional[str] = None, model_type: str = "Meso4"):
-        """
-        Initialize the adaptive pipeline
-        
-        Args:
-            weights_path: Path to pretrained weights
-            model_type: "Meso4" or "MesoInception4"
-        """
+
+    def __init__(self, weights_path: Optional[str] = None, model_type: str = "MesoInception4"):
         self.model_type: str = model_type
+
+        # Prefer MesoInception4 weights; fall back to Meso4 if absent
         self.weights_path: str = weights_path or WEIGHTS_PATH
+        self._maybe_upgrade_to_inception()
+
         self.model: Optional[Union[Meso4, MesoInception4]] = None
-        
-        # Statistics tracking with explicit typing
+
         self.stats: Dict[str, Any] = {
             'total_videos': 0,
             'stage1_exits': 0,
@@ -77,27 +92,56 @@ class AdaptivePipeline:
             'total_time': 0.0,
             'stage_times': {1: 0.0, 2: 0.0, 3: 0.0}
         }
-        
+
         self._load_model()
+
+    # ------------------------------------------------------------------
+    # Weight management
+    # ------------------------------------------------------------------
+
+    def _maybe_upgrade_to_inception(self) -> None:
+        """
+        If MesoInception4_DF.h5 is not present, attempt to download it.
+        Falls back to Meso4 silently if the download fails.
+        """
+        weights_dir = os.path.dirname(self.weights_path)
+        inception_path = os.path.join(weights_dir, "MesoInception4_DF.h5")
+
+        if os.path.exists(inception_path):
+            print(f"[Upgrade] Using MesoInception4_DF.h5 (better accuracy)")
+            self.weights_path = inception_path
+            self.model_type   = "MesoInception4"
+            return
+
+        print("[Upgrade] MesoInception4_DF.h5 not found — trying to download...")
+        try:
+            r = requests.get(_INCEPTION_WEIGHTS_URL, stream=True, timeout=60)
+            r.raise_for_status()
+            with open(inception_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            size_kb = os.path.getsize(inception_path) / 1024
+            print(f"[Upgrade] ✓ Downloaded MesoInception4_DF.h5 ({size_kb:.0f} KB)")
+            self.weights_path = inception_path
+            self.model_type   = "MesoInception4"
+        except Exception as e:
+            print(f"[Upgrade] Download failed ({e}) — using Meso4_DF.h5")
+            self.model_type = "Meso4"
     
     def _load_model(self):
-        """Load the MesoNet model"""
+        """Load the MesoNet model (Meso4 or MesoInception4)"""
         print(f"Loading {self.model_type} model...")
-        
-        if self.model_type == "Meso4":
-            self.model = Meso4(input_shape=(256, 256, 3))
-        elif self.model_type == "MesoInception4":
+
+        if self.model_type == "MesoInception4":
             self.model = MesoInception4(input_shape=(256, 256, 3))
         else:
-            raise ValueError(f"Unknown model type: {self.model_type}")
-        
-        # Ensure model is initialized before building
+            self.model = Meso4(input_shape=(256, 256, 3))
+
         model = self.model
         if model is None:
             raise RuntimeError(f"Failed to create {self.model_type} model")
         model.build()
-        
-        # Load weights if available
+
         if os.path.exists(self.weights_path):
             print(f"Loading weights from: {self.weights_path}")
             model.load_weights(self.weights_path)
@@ -105,43 +149,74 @@ class AdaptivePipeline:
         else:
             print(f"⚠ Warning: Weights not found at {self.weights_path}")
             print("  Model will use random initialization (for demo purposes)")
-    
-    def _predict_frames(self, frames: np.ndarray) -> float:
-        """
-        Calculates image-level probabilities and aggregates them.
-        Equation 3 & 4: p(s) = (1/|Ss|) * sum(pi)
 
-        MesoNet Convention (Meso4_DF.h5):
-            p_i close to 1.0 => frame is REAL
-            p_i close to 0.0 => frame is DEEPFAKE
+    # ------------------------------------------------------------------
+    # Core inference helpers
+    # ------------------------------------------------------------------
 
-        Args:
-            frames: numpy array of processed frames
-
-        Returns:
-            average_probability p(s)  [high = real, low = deepfake]
-        """
-        # Preprocess frames — MesoNet expects (256, 256, 3)
-        target_resolution = (256, 256)
-        processed_frames = preprocess_frames(frames, target_shape=target_resolution, normalize=True)
-
-        # Batch inference
+    def _run_model_on_frames(self, frames: np.ndarray) -> np.ndarray:
+        """Run the CNN on pre-processed float32 frames, return raw predictions."""
         model = self.model
         if model is None:
             raise RuntimeError("Model used before initialization")
+        batch_size = int(PIPELINE_CONFIG.get('batch_size', 16))
+        return model.predict(frames, batch_size=batch_size, verbose=0)
 
-        config_batch_size = int(PIPELINE_CONFIG.get('batch_size', 1))
+    def _aggregate_predictions(self, preds: np.ndarray) -> float:
+        """
+        Trimmed-mean aggregation: discard the top and bottom 15% frame scores
+        (handles scene-cut frames, partial faces, etc.) then average the rest.
+        """
+        flat = preds.flatten()
+        if len(flat) >= 4:
+            lo = np.percentile(flat, 15)
+            hi = np.percentile(flat, 85)
+            trimmed = flat[(flat >= lo) & (flat <= hi)]
+            if len(trimmed) > 0:
+                flat = trimmed
+        return float(np.mean(flat))
 
-        predictions = model.predict(
-            processed_frames,
-            batch_size=config_batch_size,
-            verbose=0
-        )
+    def _predict_frames(self, frames: np.ndarray) -> float:
+        """
+        Full prediction pipeline for a batch of face-cropped frames:
+          1. Sharpen + resize to 256×256 + normalise
+          2. Run MesoNet (spatial score)
+          3. Run MesoNet on horizontally flipped frames (TTA)
+          4. Average spatial + TTA scores
+          5. Compute frequency-domain score (FFT)
+          6. Ensemble: 70% spatial + 30% frequency
 
-        # Aggregate predictions using arithmetic average (Equation 18)
-        avg_probability = float(np.mean(predictions))
+        Returns: p(s) in [0, 1]  — high = REAL, low = DEEPFAKE
+        """
+        # Step 1 — resize / sharpen / normalise
+        target_res = (256, 256)
+        processed = preprocess_frames(frames, target_shape=target_res,
+                                      normalize=True, sharpen=True)
 
-        return avg_probability
+        # Step 2 — MesoNet on original orientation
+        preds_orig = self._run_model_on_frames(processed)
+        spatial_orig = self._aggregate_predictions(preds_orig)
+
+        # Step 3 — TTA: horizontal flip
+        flipped = np.array([np.fliplr(f) for f in processed])
+        preds_flip = self._run_model_on_frames(flipped)
+        spatial_flip = self._aggregate_predictions(preds_flip)
+
+        # Step 4 — average original + flipped
+        spatial_score = (spatial_orig + spatial_flip) / 2.0
+        print(f"  [CNN] Spatial score = {spatial_score:.4f}  "
+              f"(orig={spatial_orig:.4f}, flip={spatial_flip:.4f})")
+
+        # Step 5 — frequency domain score (uses un-normalised frames)
+        raw_frames = preprocess_frames(frames, target_shape=target_res,
+                                       normalize=False, sharpen=False)
+        freq_score = compute_frequency_score(raw_frames)
+
+        # Step 6 — ensemble
+        ensemble = _SPATIAL_WEIGHT * spatial_score + _FREQUENCY_WEIGHT * freq_score
+        print(f"  [Ensemble] Final p(s) = {ensemble:.4f}  "
+              f"(spatial×{_SPATIAL_WEIGHT} + freq×{_FREQUENCY_WEIGHT})")
+        return float(np.clip(ensemble, 0.0, 1.0))
     
     def _process_stage(self, 
                         video_path: str, 

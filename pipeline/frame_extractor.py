@@ -272,9 +272,29 @@ class FrameExtractor:
         self.close()
 
 
+def sharpen_frame(frame: np.ndarray) -> np.ndarray:
+    """
+    Apply unsharp masking to a uint8 frame to enhance GAN blending artifacts.
+    Deepfake faces often have soft blending boundaries that become visible after
+    sharpening — this helps MesoNet pick up those cues.
+
+    Args:
+        frame: uint8 numpy array (H, W, 3) in BGR or RGB.
+
+    Returns:
+        Sharpened uint8 frame of the same shape.
+    """
+    # Gaussian blur as the low-pass reference
+    blurred = cv2.GaussianBlur(frame, (0, 0), sigmaX=1.5)
+    # Unsharp mask: original + alpha * (original - blurred)
+    sharpened = cv2.addWeighted(frame, 1.5, blurred, -0.5, 0)
+    return np.clip(sharpened, 0, 255).astype(np.uint8)
+
+
 def preprocess_frames(frames: np.ndarray, 
                       target_shape: Optional[Tuple[int, int]] = None, 
-                      normalize: bool = True) -> np.ndarray:
+                      normalize: bool = True,
+                      sharpen: bool = True) -> np.ndarray:
     """
     Preprocess frames for model input
     
@@ -282,10 +302,18 @@ def preprocess_frames(frames: np.ndarray,
         frames: numpy array of frames (N, H, W, 3)
         target_shape: Optional (height, width) to resize to
         normalize: Whether to normalize to [0, 1]
+        sharpen: Whether to apply unsharp masking to expose GAN artifacts
         
     Returns:
         Preprocessed frames
     """
+    # Apply sharpening FIRST on uint8 data (before normalisation)
+    if sharpen:
+        sharpened_frames = []
+        for i in range(len(frames)):
+            sharpened_frames.append(sharpen_frame(frames[i]))
+        frames = np.array(sharpened_frames)
+
     # Resize if needed
     if target_shape is not None:
         resized_frames = []
