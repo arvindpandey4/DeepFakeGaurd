@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, X, Check, AlertTriangle, Play, Shield, ShieldAlert, Cpu, Activity, Clock, Database, ChevronRight, DownloadCloud, RefreshCw } from 'lucide-react';
+import { Upload, X, Check, AlertTriangle, Play, Shield, ShieldAlert, Cpu, Activity, Clock, Database, ChevronRight, DownloadCloud, RefreshCw, Trash2 } from 'lucide-react';
 
 // API Configuration
 const API_URL = "http://localhost:8000";
@@ -16,7 +16,9 @@ function App() {
     const [availableRemoteVideos, setAvailableRemoteVideos] = useState([]);
     const [isDownloading, setIsDownloading] = useState(false);
     const [showDownloadModal, setShowDownloadModal] = useState(false);
-    const [downloadCategory, setDownloadCategory] = useState('REAL'); // 'REAL' or 'DEEPFAKE'
+    const [downloadCategory, setDownloadCategory] = useState('REAL');
+    const [cacheReady, setCacheReady] = useState(false);
+    const pollTimerRef = useRef(null);
     const fileInputRef = useRef(null);
 
     // Fetch demo videos on mount
@@ -34,10 +36,19 @@ function App() {
     };
 
     const fetchRemoteVideos = async () => {
-        setIsDownloading("fetching"); // Use a special string for fetching state
+        setIsDownloading("fetching");
         try {
             const res = await axios.get(`${API_URL}/available-remote-videos`);
-            setAvailableRemoteVideos(res.data);
+            setAvailableRemoteVideos(res.data.videos || []);
+            setCacheReady(res.data.is_ready);
+
+            if (!res.data.is_ready) {
+                // Still loading — poll every 3s
+                if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+                pollTimerRef.current = setTimeout(fetchRemoteVideos, 3000);
+            } else {
+                if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+            }
         } catch (err) {
             console.error("Failed to load remote videos", err);
             setError("Failed to fetch dataset from Hugging Face.");
@@ -148,6 +159,26 @@ function App() {
         setError(null);
     };
 
+    const clearCache = async () => {
+        if (!window.confirm("Are you sure you want to clear all downloaded videos and analysis results? This cannot be undone.")) {
+            return;
+        }
+
+        try {
+            await axios.post(`${API_URL}/clear-cache`);
+            // Reset local state
+            reset();
+            setDemoVideos([]);
+            setAvailableRemoteVideos([]);
+            // Refresh video lists
+            await fetchDemoVideos();
+            alert("Cache cleared successfully!");
+        } catch (err) {
+            console.error("Failed to clear cache", err);
+            setError("Failed to clear cache.");
+        }
+    };
+
     return (
         <div className="min-h-screen bg-neutral-950 text-white selection:bg-cyan-500/30 font-sans relative overflow-hidden">
             {/* Background Gradients */}
@@ -170,6 +201,16 @@ function App() {
                         </div>
                     </div>
                     <div className="flex items-center gap-4">
+                        <button
+                            onClick={clearCache}
+                            className="p-2.5 rounded-full bg-red-500/10 border border-red-500/20 text-red-500 hover:bg-red-500/20 transition-all group relative"
+                            title="Clear Cache & Results"
+                        >
+                            <Trash2 className="w-5 h-5" />
+                            <span className="absolute -bottom-10 right-0 bg-red-900 border border-red-500/30 text-[10px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
+                                Clear Cache
+                            </span>
+                        </button>
                         <div className="flex bg-white/5 rounded-full p-1 border border-white/5 backdrop-blur-md">
                             <button
                                 onClick={() => {
@@ -495,7 +536,12 @@ function App() {
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <button
-                                        onClick={fetchRemoteVideos}
+                                        onClick={async () => {
+                                            try { await axios.post(`${API_URL}/sync-remote-videos`); } catch (_) { }
+                                            setCacheReady(false);
+                                            setAvailableRemoteVideos([]);
+                                            fetchRemoteVideos();
+                                        }}
                                         disabled={isDownloading === "fetching"}
                                         className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs font-bold hover:bg-white/10 transition-all text-cyan-400"
                                     >
@@ -537,7 +583,12 @@ function App() {
                                 {availableRemoteVideos.length === 0 ? (
                                     <div className="flex flex-col items-center py-12 text-center">
                                         <RefreshCw className="w-8 h-8 text-cyan-500 animate-spin mb-4" />
-                                        <p className="text-sm text-neutral-400">Connecting to secure repository...</p>
+                                        <p className="text-sm text-neutral-400">
+                                            {cacheReady ? 'No videos found.' : 'Loading from Hugging Face...'}
+                                        </p>
+                                        {!cacheReady && (
+                                            <p className="text-xs text-neutral-600 mt-1">This takes ~30s on first load</p>
+                                        )}
                                     </div>
                                 ) : (
                                     availableRemoteVideos

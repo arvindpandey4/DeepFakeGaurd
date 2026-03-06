@@ -2,16 +2,17 @@ import os
 import shutil
 import uuid
 import time
-import requests # type: ignore
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks # type: ignore
-from fastapi.middleware.cors import CORSMiddleware # type: ignore
-from fastapi.staticfiles import StaticFiles # type: ignore
-from pathlib import Path
-from pydantic import BaseModel # type: ignore
-
+import threading
+import itertools
+import urllib.parse
+import requests  # type: ignore
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks  # type: ignore
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore
+from fastapi.staticfiles import StaticFiles  # type: ignore
+from pydantic import BaseModel  # type: ignore
 from typing import List, Dict, Optional, Any
 import sys
-from huggingface_hub import hf_hub_download, list_repo_files, hf_hub_url # type: ignore
+from huggingface_hub import hf_hub_download, list_repo_files, hf_hub_url  # type: ignore
 
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
@@ -87,37 +88,36 @@ async def analyze_video(file: UploadFile = File(...)):
 
 # --- Dynamic Hugging Face Integration ---
 
-# UniDataPro: deepfake/ = DEEPFAKE
 UNIDATAPRO_REPO = "UniDataPro/deepfake-videos-dataset"
-
+ALT_DEEPFAKE_REPO = "DGSpitzer/Cyberpunk-Anime-Diffusion"  # fallback if UniDataPro has issues
 CACHE_DIR = os.path.join(project_root, "hf_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-def get_dynamic_videos() -> List[Dict[str, Any]]:
-    """Fetch deepfake video list from UniDataPro HF repo + Kinetics400 for real"""
+# ── In-memory cache so the frontend never waits 30s ──────────────────────────
+_video_cache: List[Dict[str, Any]] = []
+_cache_lock = threading.Lock()
+_cache_ready = False
+
+
+def _fetch_videos_background():
+    """Runs once in a background thread at startup (and on manual sync)."""
+    global _video_cache, _cache_ready
+    print("[HF] Background fetch started...")
+    t0 = time.time()
     results: List[Dict[str, Any]] = []
-    
-    # 1. Fetch REAL videos from Kinetics400
+
+    # 1. REAL videos from Kinetics400 (5 samples)
     try:
-        from datasets import load_dataset # type: ignore
+        from datasets import load_dataset  # type: ignore
         ds = load_dataset("liuhuanjim013/kinetics400", split="train", streaming=True)
-        
-        # Take first 10 items
-        import itertools
-        for item in itertools.islice(ds, 10):
-            url = item.get("video link")
-            # Create a safe filename from clip_name or clip_path
+        for item in itertools.islice(ds, 5):
             clip_name = item.get("clip_name", "kinetics_video")
             if not clip_name.endswith('.mp4'):
                 clip_name += '.mp4'
-                
-            import urllib.parse
             url = item.get("video link", "")
-            
             hf_path = None
             if url and "resolve/main/" in url:
                 hf_path = urllib.parse.unquote(url.split("resolve/main/")[-1])
-                
             results.append({
                 "id": f"kinetics400_{clip_name.replace('.', '_')}",
                 "repo_id": "liuhuanjim013/kinetics400" if hf_path else None,
@@ -125,17 +125,23 @@ def get_dynamic_videos() -> List[Dict[str, Any]]:
                 "hf_path": hf_path,
                 "url": url,
                 "type": "REAL",
-                "description": f"Real: {item.get('action_class', 'Kinetics400 Source')}"
+                "description": f"Real: {item.get('action_class', 'Kinetics400')}"
             })
+        print(f"[HF] Got {sum(1 for v in results if v['type']=='REAL')} REAL videos")
     except Exception as e:
-        print(f"Error fetching real videos from Kinetics400: {e}")
-    # 2. Fetch DEEPFAKE videos from UniDataPro
+        print(f"[HF] Error fetching Kinetics400: {e}")
+
+    # 2. DEEPFAKE videos — Primary: UniDataPro (face-swap MP4s)
+    deepfake_count = 0
     try:
-        from huggingface_hub import list_repo_files, hf_hub_url # type: ignore
         files = list(list_repo_files(UNIDATAPRO_REPO, repo_type="dataset"))
         video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
-        fake_files = [f for f in files if isinstance(f, str) and f.startswith("deepfake/") and f.lower().endswith(video_extensions)][:10]  # type: ignore
-        
+        fake_files = [
+            f for f in files
+            if isinstance(f, str)
+            and f.startswith("deepfake/")
+            and f.lower().endswith(video_extensions)
+        ][:5]
         for f in fake_files:
             fname = os.path.basename(f)
             results.append({
@@ -145,28 +151,77 @@ def get_dynamic_videos() -> List[Dict[str, Any]]:
                 "hf_path": f,
                 "url": hf_hub_url(repo_id=UNIDATAPRO_REPO, filename=f, repo_type="dataset"),
                 "type": "DEEPFAKE",
-                "description": f"Deepfake: {fname} (UniDataPro)"
+                "description": f"Deepfake: {fname} (UniDataPro face-swap)"
             })
+            deepfake_count += 1
+        print(f"[HF] Got {deepfake_count} DEEPFAKE videos from UniDataPro")
     except Exception as e:
-        print(f"Error fetching deepfakes from UniDataPro: {e}")
-    
-    return results
+        print(f"[HF] Error fetching UniDataPro: {e}")
+
+    # 2b. DEEPFAKE videos — Secondary fallback: TraoreIbrahim/deepfake_face_videos_dataset
+    if deepfake_count < 3:
+        try:
+            FALLBACK_REPO = "TraoreIbrahim/deepfake_face_videos_dataset"
+            fallback_files = list(list_repo_files(FALLBACK_REPO, repo_type="dataset"))
+            video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
+            fallback_fakes = [
+                f for f in fallback_files
+                if isinstance(f, str) and f.lower().endswith(video_extensions)
+            ][: (5 - deepfake_count)]
+            for f in fallback_fakes:
+                fname = os.path.basename(f)
+                results.append({
+                    "id": f"fallback_{fname.replace('.', '_')}",
+                    "repo_id": FALLBACK_REPO,
+                    "name": fname,
+                    "hf_path": f,
+                    "url": hf_hub_url(repo_id=FALLBACK_REPO, filename=f, repo_type="dataset"),
+                    "type": "DEEPFAKE",
+                    "description": f"Deepfake: {fname} (fallback dataset)"
+                })
+            print(f"[HF] Fallback: added {len(fallback_fakes)} extra DEEPFAKE videos")
+        except Exception as e:
+            print(f"[HF] Fallback dataset also failed: {e}")
+
+    with _cache_lock:
+        _video_cache = results
+        _cache_ready = True
+    print(f"[HF] Cache ready — {len(results)} videos in {time.time()-t0:.1f}s")
+
+
+# Kick off background fetch immediately at import time
+_bg_thread = threading.Thread(target=_fetch_videos_background, daemon=True)
+_bg_thread.start()
+
 
 @app.get("/available-remote-videos")
 def list_available_remote_videos():
-    """List videos available for download from remote sources"""
-    reliable_videos = get_dynamic_videos()
+    """Returns the cached video list instantly. 'is_ready' tells the UI if the cache has loaded."""
+    with _cache_lock:
+        videos = list(_video_cache)
+        ready = _cache_ready
+
     results = []
-    for video in reliable_videos:
-        # Use a unique name to avoid collisions if different folders have same filename
+    for video in videos:
         local_name = f"{video['type'].lower()}_{video['name']}"
         video_path = os.path.join(CACHE_DIR, local_name)
-        
         video_copy: Any = video.copy()
         video_copy["local_name"] = local_name
         video_copy["is_downloaded"] = os.path.exists(video_path) and os.path.getsize(video_path) > 0
         results.append(video_copy)
-    return results
+
+    return {"is_ready": ready, "videos": results}
+
+
+@app.post("/sync-remote-videos")
+def sync_remote_videos():
+    """Manually trigger a background re-fetch of the HF video list."""
+    global _cache_ready
+    with _cache_lock:
+        _cache_ready = False
+    t = threading.Thread(target=_fetch_videos_background, daemon=True)
+    t.start()
+    return {"status": "sync started"}
 
 class DownloadRequest(BaseModel):
     video_id: str
@@ -174,7 +229,8 @@ class DownloadRequest(BaseModel):
 @app.post("/download-remote-video")
 async def download_remote_video(request: DownloadRequest):
     """Download a video from HF Hub to the local cache"""
-    all_videos = get_dynamic_videos()
+    with _cache_lock:
+        all_videos = list(_video_cache)
     video = next((v for v in all_videos if v["id"] == request.video_id), None)
     
     if not video:
@@ -284,11 +340,49 @@ def analyze_demo_video(request: DemoRequest):
         result["filename"] = filename
         
         return result
-        
+
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+
+@app.post("/clear-cache")
+def clear_cache():
+    """Wipe all downloaded videos and uploaded results to start fresh."""
+    try:
+        # Clear hf_cache
+        if os.path.exists(CACHE_DIR):
+            for filename in os.listdir(CACHE_DIR):
+                file_path = os.path.join(CACHE_DIR, filename)
+                try:
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                except Exception as e:
+                    print(f'Failed to delete {file_path}. Reason: {e}')
+        
+        # Clear uploads
+        if os.path.exists(UPLOAD_DIR):
+            for filename in os.listdir(UPLOAD_DIR):
+                file_path = os.path.join(UPLOAD_DIR, filename)
+                try:
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                except Exception as e:
+                    print(f'Failed to delete {file_path}. Reason: {e}')
+        
+        return {"status": "success", "message": "Cache cleared successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
+
+@app.get("/stats")
+def get_pipeline_stats():
+    """Get overall pipeline performance statistics."""
+    return pipeline.stats
 
 if __name__ == "__main__":
     import uvicorn # type: ignore

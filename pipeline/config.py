@@ -23,7 +23,7 @@ STAGE1_CONFIG: Dict[str, Any] = {
     "name": "Fast Inference",
     "frames_per_second": 0.5,         # Extract 1 frame every 2 seconds (n1)
     "resolution": (128, 128),         # Scale factor r1 = 0.5 (native is 256)
-    "confidence_threshold": 0.90,     # High confidence threshold tau1
+    "confidence_threshold": 0.85,     # [TUNED] Lowered from 0.90 → 0.85 to reduce false early exits
     "description": "Quick filtering of obvious cases using global sampling"
 }
 
@@ -37,7 +37,7 @@ STAGE2_CONFIG: Dict[str, Any] = {
     "name": "Balanced Inference",
     "frames_per_second": 2,           # Extract 2 frames per second (n2)
     "resolution": (192, 192),         # Scale factor r2 = 0.75
-    "confidence_threshold": 0.80,     # Moderate confidence threshold tau2
+    "confidence_threshold": 0.65,     # [TUNED] Lowered from 0.80 → 0.65 to force hard cases into Stage 3
     "description": "Moderate analysis for uncertain cases"
 }
 
@@ -72,7 +72,7 @@ PIPELINE_CONFIG: Dict[str, Any] = {
 
 VIDEO_CONFIG: Dict[str, Any] = {
     "max_duration": 60,               # Maximum video duration to process (seconds)
-    "face_detection": False,          # Enable face detection preprocessing (requires additional setup)
+    "face_detection": True,           # [ENABLED] Face crop preprocessing via OpenCV Haar/DNN cascade
     "normalize": True,                # Normalize pixel values to [0, 1]
 }
 
