@@ -1,7 +1,6 @@
 # Start the Deepfake Detection App (Backend + Frontend)
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-Write-Host "🚀 Starting Deepfake Detection System..." -ForegroundColor Cyan
+Write-Host "Starting Deepfake Detection System..." -ForegroundColor Cyan
 
 # 1. Start Backend (API)
 Write-Host "Starting Backend (Port 8000)..." -ForegroundColor Yellow
@@ -21,7 +20,7 @@ Start-Sleep -Seconds 4
 Write-Host "Opening Dashboard..." -ForegroundColor Green
 Start-Process "http://localhost:5173"
 
-Write-Host "✅ System is running!" -ForegroundColor Green
+Write-Host "System is running!" -ForegroundColor Green
 Write-Host "   - Backend: http://localhost:8000"
 Write-Host "   - Frontend: http://localhost:5173"
 Write-Host "   (To stop everything, run .\stop_app.ps1)"

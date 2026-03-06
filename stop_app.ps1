@@ -1,16 +1,12 @@
 # Stop the Deepfake Detection App
-# Set encoding to handle emojis correctly
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-Write-Host "🛑 Stopping Deepfake Detection System..." -ForegroundColor Red
+Write-Host "Stopping Deepfake Detection System..." -ForegroundColor Red
 
 # Function to stop process by port
 function Stop-PortProcess($port) {
-    # Get all connections on the port
     $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
     
     if ($connections) {
-        # Get unique PIDs, filter out 0 (System) and duplicates
         $pids = $connections.OwningProcess | Select-Object -Unique | Where-Object { $_ -gt 0 }
         
         foreach ($processId in $pids) {
@@ -39,4 +35,4 @@ Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorActio
 Write-Host "Cleaning up Python processes..."
 Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like "*api.py*" } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-Write-Host "✅ System stopped successfully." -ForegroundColor Green
+Write-Host "System stopped successfully." -ForegroundColor Green

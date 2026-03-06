@@ -5,9 +5,9 @@ Based on: "MesoNet: a Compact Facial Video Forgery Detection Network"
 Original implementation: https://github.com/DariusAf/MesoNet
 """
 
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, Flatten, Conv2D, MaxPooling2D, BatchNormalization, Dropout, Reshape, Concatenate, LeakyReLU
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Model # type: ignore
+from tensorflow.keras.layers import Input, Dense, Flatten, Conv2D, MaxPooling2D, BatchNormalization, Dropout, Reshape, Concatenate, LeakyReLU # type: ignore
+from tensorflow.keras.optimizers import Adam # type: ignore
 
 
 class Meso4:
@@ -63,7 +63,7 @@ class Meso4:
         self.model = Model(inputs=x, outputs=y)
         
         optimizer = Adam(learning_rate=self.learning_rate)
-        self.model.compile(optimizer=optimizer,
+        self.model.compile(optimizer=optimizer, # type: ignore
                           loss='binary_crossentropy',
                           metrics=['accuracy'])
         
@@ -73,19 +73,19 @@ class Meso4:
         """Load pretrained weights"""
         if self.model is None:
             self.build()
-        self.model.load_weights(weights_path)
+        self.model.load_weights(weights_path) # type: ignore
         
     def predict(self, x, **kwargs):
         """Make prediction on input"""
         if self.model is None:
             raise ValueError("Model not built. Call build() or load_weights() first.")
-        return self.model.predict(x, **kwargs)
+        return self.model.predict(x, **kwargs) # type: ignore
     
     def summary(self):
         """Print model summary"""
         if self.model is None:
             self.build()
-        return self.model.summary()
+        return self.model.summary() # type: ignore
 
 
 class MesoInception4:
@@ -160,7 +160,7 @@ class MesoInception4:
         self.model = Model(inputs=x, outputs=y)
         
         optimizer = Adam(learning_rate=self.learning_rate)
-        self.model.compile(optimizer=optimizer,
+        self.model.compile(optimizer=optimizer, # type: ignore
                           loss='binary_crossentropy',
                           metrics=['accuracy'])
         
@@ -170,19 +170,19 @@ class MesoInception4:
         """Load pretrained weights"""
         if self.model is None:
             self.build()
-        self.model.load_weights(weights_path)
+        self.model.load_weights(weights_path) # type: ignore
         
     def predict(self, x, **kwargs):
         """Make prediction on input"""
         if self.model is None:
             raise ValueError("Model not built. Call build() or load_weights() first.")
-        return self.model.predict(x, **kwargs)
+        return self.model.predict(x, **kwargs) # type: ignore
     
     def summary(self):
         """Print model summary"""
         if self.model is None:
             self.build()
-        return self.model.summary()
+        return self.model.summary() # type: ignore
 
 
 if __name__ == "__main__":
