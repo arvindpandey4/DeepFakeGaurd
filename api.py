@@ -110,7 +110,7 @@ def _fetch_videos_background():
     try:
         from datasets import load_dataset  # type: ignore
         ds = load_dataset("liuhuanjim013/kinetics400", split="train", streaming=True)
-        for item in itertools.islice(ds, 5):
+        for item in itertools.islice(ds, 20):
             clip_name = item.get("clip_name", "kinetics_video")
             if not clip_name.endswith('.mp4'):
                 clip_name += '.mp4'
@@ -141,7 +141,7 @@ def _fetch_videos_background():
             if isinstance(f, str)
             and f.startswith("deepfake/")
             and f.lower().endswith(video_extensions)
-        ][:5]
+        ][:20]
         for f in fake_files:
             fname = os.path.basename(f)
             results.append({
@@ -167,7 +167,7 @@ def _fetch_videos_background():
             fallback_fakes = [
                 f for f in fallback_files
                 if isinstance(f, str) and f.lower().endswith(video_extensions)
-            ][: (5 - deepfake_count)]
+            ][: (20 - deepfake_count)]
             for f in fallback_fakes:
                 fname = os.path.basename(f)
                 results.append({

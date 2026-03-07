@@ -52,6 +52,33 @@ except ImportError:
 _SPATIAL_WEIGHT    = 0.70   # MesoNet CNN spatial score
 _FREQUENCY_WEIGHT  = 0.30   # FFT frequency-domain score
 
+
+# ---------------------------------------------------------------------------
+# Probability normalisation utility  (Task 7 from paper alignment spec)
+# ---------------------------------------------------------------------------
+def normalize_to_fake_prob(score: float, mode: str = "real_prob") -> float:
+    """
+    Convert any detector output to a **deepfake probability** before
+    ensemble fusion.  This is the single choke-point for probability
+    semantics — all detectors must pass through here.
+
+    Args:
+        score: Raw detector output, already in [0, 1].
+        mode:  "real_prob"  → detector output is P(real);  return 1 - score
+               "fake_prob"  → detector output is P(fake);  return score as-is
+
+    Returns:
+        p_fake ∈ [0.001, 0.999]  (clamped for numerical stability)
+    """
+    if mode == "real_prob":
+        p_fake = 1.0 - score
+    elif mode == "fake_prob":
+        p_fake = score
+    else:
+        raise ValueError(f"normalize_to_fake_prob: unknown mode '{mode}'")
+    # Clamp to (0, 1) open interval — prevents log(0) / division issues
+    return float(np.clip(p_fake, 0.001, 0.999))
+
 # URL for the more accurate MesoInception4 weights (official MesoNet repo)
 _INCEPTION_WEIGHTS_URL = (
     "https://github.com/DariusAf/MesoNet/raw/master/weights/MesoInception4_DF.h5"
@@ -180,43 +207,57 @@ class AdaptivePipeline:
         """
         Full prediction pipeline for a batch of face-cropped frames:
           1. Sharpen + resize to 256×256 + normalise
-          2. Run MesoNet (spatial score)
+          2. Run MesoNet (spatial score)  — outputs real_prob by convention
           3. Run MesoNet on horizontally flipped frames (TTA)
-          4. Average spatial + TTA scores
-          5. Compute frequency-domain score (FFT)
-          6. Ensemble: 70% spatial + 30% frequency
+          4. Average original + flipped spatial scores
+          5. Convert spatial real_prob → fake_prob via normalize_to_fake_prob()
+          6. Compute frequency-domain score (FFT)  — also real_prob
+          7. Convert frequency real_prob → fake_prob via normalize_to_fake_prob()
+          8. Ensemble: p(s) = w_spatial·p_fake_spatial + w_freq·p_fake_freq
 
-        Returns: p(s) in [0, 1]  — high = REAL, low = DEEPFAKE
+        Returns:
+            p(s) ∈ [0.001, 0.999]  — DEEPFAKE probability
+            (paper def: P(y=1|f), y=1 ↔ deepfake, y=0 ↔ real)
+            High p(s) → DEEPFAKE,  Low p(s) → REAL
         """
         # Step 1 — resize / sharpen / normalise
         target_res = (256, 256)
         processed = preprocess_frames(frames, target_shape=target_res,
                                       normalize=True, sharpen=True)
 
-        # Step 2 — MesoNet on original orientation
+        # Step 2 — MesoNet on original orientation (output: real_prob)
         preds_orig = self._run_model_on_frames(processed)
-        spatial_orig = self._aggregate_predictions(preds_orig)
+        spatial_orig_real = self._aggregate_predictions(preds_orig)
 
-        # Step 3 — TTA: horizontal flip
+        # Step 3 — TTA: horizontal flip (output: real_prob)
         flipped = np.array([np.fliplr(f) for f in processed])
         preds_flip = self._run_model_on_frames(flipped)
-        spatial_flip = self._aggregate_predictions(preds_flip)
+        spatial_flip_real = self._aggregate_predictions(preds_flip)
 
-        # Step 4 — average original + flipped
-        spatial_score = (spatial_orig + spatial_flip) / 2.0
-        print(f"  [CNN] Spatial score = {spatial_score:.4f}  "
-              f"(orig={spatial_orig:.4f}, flip={spatial_flip:.4f})")
+        # Step 4 — average original + flipped (still real_prob)
+        spatial_score_real = (spatial_orig_real + spatial_flip_real) / 2.0
 
-        # Step 5 — frequency domain score (uses un-normalised frames)
+        # Step 5 — convert CNN real_prob → deepfake_prob
+        p_fake_spatial = normalize_to_fake_prob(spatial_score_real, mode="real_prob")
+        print(f"  [CNN] p_fake_spatial = {p_fake_spatial:.4f}  "
+              f"(real_orig={spatial_orig_real:.4f}, real_flip={spatial_flip_real:.4f})")
+
+        # Step 6 — frequency domain score (uses un-normalised frames; output: real_prob)
         raw_frames = preprocess_frames(frames, target_shape=target_res,
                                        normalize=False, sharpen=False)
-        freq_score = compute_frequency_score(raw_frames)
+        freq_score_real = compute_frequency_score(raw_frames)
 
-        # Step 6 — ensemble
-        ensemble = _SPATIAL_WEIGHT * spatial_score + _FREQUENCY_WEIGHT * freq_score
-        print(f"  [Ensemble] Final p(s) = {ensemble:.4f}  "
-              f"(spatial×{_SPATIAL_WEIGHT} + freq×{_FREQUENCY_WEIGHT})")
-        return float(np.clip(ensemble, 0.0, 1.0))
+        # Step 7 — convert frequency real_prob → deepfake_prob
+        p_fake_freq = normalize_to_fake_prob(freq_score_real, mode="real_prob")
+        print(f"  [FreqEnsemble] p_fake_freq = {p_fake_freq:.4f}")
+
+        # Step 8 — ensemble: p(s) = w_spatial * p_fake_spatial + w_freq * p_fake_freq
+        ensemble = _SPATIAL_WEIGHT * p_fake_spatial + _FREQUENCY_WEIGHT * p_fake_freq
+        # Clamp to [0.001, 0.999] for numerical stability (Task 8)
+        p_s = float(np.clip(ensemble, 0.001, 0.999))
+        print(f"  [Ensemble] Final p(s) = {p_s:.4f}  "
+              f"(deepfake prob; spatial×{_SPATIAL_WEIGHT} + freq×{_FREQUENCY_WEIGHT})")
+        return p_s
     
     def _process_stage(self, 
                         video_path: str, 
@@ -247,20 +288,20 @@ class AdaptivePipeline:
         p_s = self._predict_frames(frames)
         
         # Confidence Assessment (Section IV.D: Equation 19)
-        # MesoNet convention: p_s >= 0.5 means REAL, p_s < 0.5 means DEEPFAKE
-        # confidence_magnitude measures how far from the 0.5 decision boundary
-        confidence_magnitude = max(p_s, 1 - p_s)
+        # p(s) is now deepfake probability: P(y=1|f), y=1 ↔ deepfake
+        # confidence = max(p_s, 1-p_s) — symmetric around 0.5 decision boundary
+        confidence_magnitude = max(p_s, 1.0 - p_s)
 
         stage_time = time.time() - stage_start
 
         # Early termination condition (Section IV.B: Equation 5)
-        # Condition: max(p_s, 1 - p_s) >= tau_s
+        # Exit when confidence >= tau_s (thresholds are monotone-decreasing: τ1 > τ2 > τ3)
         tau_s = stage_config['confidence_threshold']
         should_exit = (confidence_magnitude >= tau_s) or (stage_number == 3)
 
-        # Predicted Class (Equation 6)
-        # HIGH p_s (>= 0.5) => REAL  |  LOW p_s (< 0.5) => DEEPFAKE
-        label = "REAL" if p_s >= 0.5 else "DEEPFAKE"
+        # Predicted Class (Equation 6 — paper definition)
+        # p(s) >= 0.5 → DEEPFAKE  |  p(s) < 0.5 → REAL
+        label = "DEEPFAKE" if p_s >= 0.5 else "REAL"
 
         if PIPELINE_CONFIG['verbose']:
             print(f"  p(s) = {p_s:.4f}, Confidence = {confidence_magnitude:.4f}")
@@ -333,7 +374,7 @@ class AdaptivePipeline:
         print(f"FINAL RESULT")
         print(f"{'='*60}")
         print(f"  Prediction: {f_label}")
-        print(f"  p(s) = {f_p_s:.4f}  (high=REAL, low=DEEPFAKE)")
+        print(f"  p(s) = {f_p_s:.4f}  (deepfake prob: high=DEEPFAKE, low=REAL)")
         print(f"  Confidence: {f_conf:.4f}")
         print(f"  Exit Stage: {exit_stage}")
         print(f"  Total Time: {total_time:.2f}s")

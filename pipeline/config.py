@@ -37,7 +37,7 @@ STAGE2_CONFIG: Dict[str, Any] = {
     "name": "Balanced Inference",
     "frames_per_second": 2,           # Extract 2 frames per second (n2)
     "resolution": (192, 192),         # Scale factor r2 = 0.75
-    "confidence_threshold": 0.65,     # [TUNED] Lowered from 0.80 → 0.65 to force hard cases into Stage 3
+    "confidence_threshold": 0.75,     # tau_2: monotone-decreasing from tau_1=0.85
     "description": "Moderate analysis for uncertain cases"
 }
 
@@ -51,7 +51,7 @@ STAGE3_CONFIG: Dict[str, Any] = {
     "name": "Accurate Inference",
     "frames_per_second": 5,           # Extract 5 frames per second (n3)
     "resolution": (256, 256),         # Scale factor r3 = 1.0 (Full Native)
-    "confidence_threshold": 0.0,      # Always make final decision at terminal stage
+    "confidence_threshold": 0.65,     # tau_3: terminal stage always exits regardless
     "description": "Thorough analysis for difficult cases"
 }
 
