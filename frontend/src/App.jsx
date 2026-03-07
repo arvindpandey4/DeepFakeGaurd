@@ -19,6 +19,10 @@ function App() {
     const [downloadCategory, setDownloadCategory] = useState('REAL');
     const [cacheReady, setCacheReady] = useState(false);
     const [remoteVideoPage, setRemoteVideoPage] = useState({ REAL: 0, DEEPFAKE: 0 });
+    // Lazy-loaded modal videos: independent per category
+    const [modalVideos, setModalVideos] = useState({ REAL: [], DEEPFAKE: [] });
+    const [loadingMorePage, setLoadingMorePage] = useState({ REAL: false, DEEPFAKE: false });
+    const [hasMorePage, setHasMorePage] = useState({ REAL: true, DEEPFAKE: true });
     const pollTimerRef = useRef(null);
     const fileInputRef = useRef(null);
     const PAGE_SIZE = 5;
@@ -56,6 +60,30 @@ function App() {
             setError("Failed to fetch dataset from Hugging Face.");
         } finally {
             setIsDownloading(false);
+        }
+    };
+
+    // Load a fresh random batch for a given category+page from the backend
+    const loadMoreRemoteVideos = async (category, page) => {
+        setLoadingMorePage(p => ({ ...p, [category]: true }));
+        try {
+            const res = await axios.get(`${API_URL}/load-more-videos`, { params: { category, page } });
+            const { videos, has_more } = res.data;
+            setModalVideos(m => ({ ...m, [category]: videos || [] }));
+            setHasMorePage(h => ({ ...h, [category]: has_more !== false }));
+            setRemoteVideoPage(p => ({ ...p, [category]: page }));
+        } catch (err) {
+            console.error('load-more-videos failed', err);
+        } finally {
+            setLoadingMorePage(p => ({ ...p, [category]: false }));
+        }
+    };
+
+    // Called when modal opens or tab switches — load page 0 if not yet loaded
+    const openModalForCategory = (cat) => {
+        setDownloadCategory(cat);
+        if ((modalVideos[cat] || []).length === 0) {
+            loadMoreRemoteVideos(cat, 0);
         }
     };
 
@@ -216,9 +244,8 @@ function App() {
                         <div className="flex bg-white/5 rounded-full p-1 border border-white/5 backdrop-blur-md">
                             <button
                                 onClick={() => {
-                                    setDownloadCategory('REAL');
                                     setShowDownloadModal(true);
-                                    fetchRemoteVideos();
+                                    openModalForCategory('REAL');
                                 }}
                                 className="px-4 py-1.5 rounded-full text-xs font-bold transition-all hover:bg-emerald-500/20 text-emerald-400 flex items-center gap-2"
                             >
@@ -228,9 +255,8 @@ function App() {
                             <div className="w-px h-4 bg-white/10 self-center mx-1" />
                             <button
                                 onClick={() => {
-                                    setDownloadCategory('DEEPFAKE');
                                     setShowDownloadModal(true);
-                                    fetchRemoteVideos();
+                                    openModalForCategory('DEEPFAKE');
                                 }}
                                 className="px-4 py-1.5 rounded-full text-xs font-bold transition-all hover:bg-red-500/20 text-red-400 flex items-center gap-2"
                             >
@@ -497,7 +523,8 @@ function App() {
                                             try { await axios.post(`${API_URL}/sync-remote-videos`); } catch (_) { }
                                             setCacheReady(false);
                                             setAvailableRemoteVideos([]);
-                                            fetchRemoteVideos();
+                                            setModalVideos({ REAL: [], DEEPFAKE: [] });
+                                            loadMoreRemoteVideos(downloadCategory, 0);
                                         }}
                                         disabled={isDownloading === "fetching"}
                                         className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs font-bold hover:bg-white/10 transition-all text-cyan-400"
@@ -517,7 +544,7 @@ function App() {
                             {/* Tabs */}
                             <div className="flex border-b border-white/5">
                                 <button
-                                    onClick={() => { setDownloadCategory('REAL'); setRemoteVideoPage(p => ({ ...p, REAL: 0 })); }}
+                                    onClick={() => openModalForCategory('REAL')}
                                     className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all border-b-2 ${downloadCategory === 'REAL'
                                         ? 'text-emerald-400 border-emerald-500 bg-emerald-500/5'
                                         : 'text-neutral-500 border-transparent hover:text-neutral-300'
@@ -526,7 +553,7 @@ function App() {
                                     Normal Videos (Real)
                                 </button>
                                 <button
-                                    onClick={() => { setDownloadCategory('DEEPFAKE'); setRemoteVideoPage(p => ({ ...p, DEEPFAKE: 0 })); }}
+                                    onClick={() => openModalForCategory('DEEPFAKE')}
                                     className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all border-b-2 ${downloadCategory === 'DEEPFAKE'
                                         ? 'text-red-400 border-red-500 bg-red-500/5'
                                         : 'text-neutral-500 border-transparent hover:text-neutral-300'
@@ -536,26 +563,36 @@ function App() {
                                 </button>
                             </div>
 
-
-                            {/* Paginated + animated video list */}
+                            {/* Lazy-loaded video list */}
                             {(() => {
-                                const filtered = availableRemoteVideos.filter(v => v.type === downloadCategory);
+                                const isLoading = loadingMorePage[downloadCategory];
+                                const pageVideos = modalVideos[downloadCategory] || [];
                                 const currentPage = remoteVideoPage[downloadCategory];
-                                const pageVideos = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
-                                const hasNext = (currentPage + 1) * PAGE_SIZE < filtered.length;
                                 const hasPrev = currentPage > 0;
+                                const hasNext = hasMorePage[downloadCategory];
                                 return (
                                     <>
-                                        <div className="p-6 space-y-3" style={{ minHeight: '220px' }}>
-                                            {filtered.length === 0 ? (
+                                        <div className="p-6 space-y-3" style={{ minHeight: '260px' }}>
+                                            {isLoading ? (
                                                 <div className="flex flex-col items-center py-12 text-center">
                                                     <RefreshCw className="w-8 h-8 text-cyan-500 animate-spin mb-4" />
                                                     <p className="text-sm text-neutral-400">
-                                                        {cacheReady ? 'No videos found.' : 'Loading from Hugging Face...'}
+                                                        {currentPage === 0 ? 'Loading from Hugging Face...' : 'Fetching next random batch...'}
                                                     </p>
-                                                    {!cacheReady && (
-                                                        <p className="text-xs text-neutral-600 mt-1">This takes ~30s on first load</p>
-                                                    )}
+                                                    <p className="text-xs text-neutral-600 mt-1">
+                                                        {downloadCategory === 'REAL' ? 'Real videos: ~15–25s' : 'Deepfake files: ~2–5s'}
+                                                    </p>
+                                                </div>
+                                            ) : pageVideos.length === 0 ? (
+                                                <div className="flex flex-col items-center py-12 text-center">
+                                                    <AlertTriangle className="w-8 h-8 text-neutral-600 mb-3" />
+                                                    <p className="text-sm text-neutral-400">No videos available.</p>
+                                                    <button
+                                                        onClick={() => loadMoreRemoteVideos(downloadCategory, 0)}
+                                                        className="mt-3 px-4 py-1.5 rounded-xl bg-cyan-500/10 text-cyan-400 text-xs font-bold hover:bg-cyan-500/20 transition-all"
+                                                    >
+                                                        Retry
+                                                    </button>
                                                 </div>
                                             ) : (
                                                 <AnimatePresence mode="wait">
@@ -601,23 +638,24 @@ function App() {
                                             )}
                                         </div>
 
-                                        {/* Pagination nav */}
-                                        {filtered.length > PAGE_SIZE && (
+                                        {/* Pagination nav — always visible once videos are loaded */}
+                                        {!isLoading && pageVideos.length > 0 && (
                                             <div className="px-6 pb-5 flex items-center justify-between gap-3 border-t border-white/5 pt-4">
                                                 <button
-                                                    onClick={() => setRemoteVideoPage(p => ({ ...p, [downloadCategory]: p[downloadCategory] - 1 }))}
+                                                    onClick={() => loadMoreRemoteVideos(downloadCategory, currentPage - 1)}
                                                     disabled={!hasPrev}
-                                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${hasPrev ? 'border-white/10 text-neutral-300 hover:bg-white/10 hover:border-white/20 active:scale-95'
+                                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${hasPrev
+                                                        ? 'border-white/10 text-neutral-300 hover:bg-white/10 hover:border-white/20 active:scale-95'
                                                         : 'border-white/5 text-neutral-600 cursor-not-allowed opacity-40'}`}
                                                 >
                                                     <ChevronRight className="w-3.5 h-3.5 rotate-180" /> Back
                                                 </button>
                                                 <span className="text-[10px] font-mono text-neutral-400">
-                                                    {currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, filtered.length)}
-                                                    <span className="text-neutral-600"> / {filtered.length} videos</span>
+                                                    Page {currentPage + 1}
+                                                    <span className="text-neutral-600"> · 5 videos</span>
                                                 </span>
                                                 <button
-                                                    onClick={() => setRemoteVideoPage(p => ({ ...p, [downloadCategory]: p[downloadCategory] + 1 }))}
+                                                    onClick={() => loadMoreRemoteVideos(downloadCategory, currentPage + 1)}
                                                     disabled={!hasNext}
                                                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${hasNext
                                                         ? `border-white/10 hover:bg-white/10 hover:border-white/20 active:scale-95 ${downloadCategory === 'DEEPFAKE' ? 'text-red-400' : 'text-emerald-400'}`
@@ -630,6 +668,7 @@ function App() {
                                     </>
                                 );
                             })()}
+
 
                             <div className="p-6 bg-white/5 border-t border-white/5">
                                 <p className="text-[10px] text-neutral-500 text-center italic">

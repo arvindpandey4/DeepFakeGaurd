@@ -2,6 +2,7 @@ import os
 import shutil
 import uuid
 import time
+import random
 import threading
 import itertools
 import urllib.parse
@@ -183,10 +184,17 @@ def _fetch_videos_background():
         except Exception as e:
             print(f"[HF] Fallback dataset also failed: {e}")
 
+    # Shuffle each category independently before caching so page-0 is already varied
+    real_videos  = [v for v in results if v['type'] == 'REAL']
+    fake_videos  = [v for v in results if v['type'] != 'REAL']
+    random.shuffle(real_videos)
+    random.shuffle(fake_videos)
+    shuffled = real_videos + fake_videos
+
     with _cache_lock:
-        _video_cache = results
+        _video_cache = shuffled
         _cache_ready = True
-    print(f"[HF] Cache ready — {len(results)} videos in {time.time()-t0:.1f}s")
+    print(f"[HF] Cache ready — {len(shuffled)} videos in {time.time()-t0:.1f}s")
 
 
 # Kick off background fetch immediately at import time
@@ -222,6 +230,145 @@ def sync_remote_videos():
     t = threading.Thread(target=_fetch_videos_background, daemon=True)
     t.start()
     return {"status": "sync started"}
+
+
+@app.get("/load-more-videos")
+def load_more_videos_paged(category: str = "REAL", page: int = 0):
+    """
+    Lazy-paginated video loader.
+    page=0 is served from the startup cache (instant).
+    page>0 triggers a fresh random HF fetch for that category:
+      DEEPFAKE — lists + shuffles all repo files: ~2–5s
+      REAL     — streams Kinetics400 with a seeded shuffle: ~10–20s
+    Returns: {videos: [...], page: int, has_more: bool}
+    """
+    PAGE_SIZE = 5
+
+    # ── page 0: serve straight from the startup cache ────────────────────────
+    if page == 0:
+        with _cache_lock:
+            cached = [v for v in _video_cache if v['type'] == category]
+        pool = list(cached)
+        random.shuffle(pool)          # re-shuffle so each modal open is fresh
+        slice_ = pool[:PAGE_SIZE]
+        results = []
+        for video in slice_:
+            local_name = f"{video['type'].lower()}_{video['name']}"
+            video_path = os.path.join(CACHE_DIR, local_name)
+            vc = video.copy()
+            vc['local_name'] = local_name
+            vc['is_downloaded'] = os.path.exists(video_path) and os.path.getsize(video_path) > 0
+            results.append(vc)
+        return {"videos": results, "page": 0, "has_more": True}
+
+    # ── page>0: fetch a FRESH random batch from HF ───────────────────────────
+    rng = random.Random(page * 97 + hash(category) % 1000)   # reproducible per page
+    fresh: List[Dict[str, Any]] = []
+
+    if category == "DEEPFAKE":
+        # Listing file names is metadata-only (~2s). Merge both repos for a larger pool.
+        try:
+            video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
+            all_fake_files: List[str] = []
+
+            # Primary repo
+            try:
+                primary_files = list(list_repo_files(UNIDATAPRO_REPO, repo_type="dataset"))
+                all_fake_files += [
+                    (UNIDATAPRO_REPO, f) for f in primary_files
+                    if isinstance(f, str)
+                    and f.startswith("deepfake/")
+                    and f.lower().endswith(video_extensions)
+                ]
+                print(f"[HF] load-more: {len(all_fake_files)} deepfake files from primary repo")
+            except Exception as e1:
+                print(f"[HF] load-more primary error: {e1}")
+
+            # Fallback repo (always merge — gives more variety)
+            try:
+                FALLBACK_REPO = "TraoreIbrahim/deepfake_face_videos_dataset"
+                fallback_files = list(list_repo_files(FALLBACK_REPO, repo_type="dataset"))
+                all_fake_files += [
+                    (FALLBACK_REPO, f) for f in fallback_files
+                    if isinstance(f, str)
+                    and f.lower().endswith(video_extensions)
+                ]
+                print(f"[HF] load-more: {len(all_fake_files)} deepfake files total (with fallback)")
+            except Exception as e2:
+                print(f"[HF] load-more fallback error: {e2}")
+
+            if not all_fake_files:
+                fresh, has_more = [], False
+            else:
+                # random.sample with page-seeded RNG — always returns up to PAGE_SIZE items
+                # even when pool is smaller than PAGE_SIZE (no empty-slice problem)
+                pick_n = min(PAGE_SIZE, len(all_fake_files))
+                selected = rng.sample(all_fake_files, pick_n)
+
+                for (repo_id, f) in selected:
+                    fname = os.path.basename(f)
+                    vid_id = f"deepfake_{repo_id.replace('/', '_')}_{fname.replace('.', '_')}_p{page}"
+                    local_name = f"deepfake_{fname}"
+                    source_label = "UniDataPro" if repo_id == UNIDATAPRO_REPO else "fallback"
+                    fresh.append({
+                        "id": vid_id,
+                        "repo_id": repo_id,
+                        "name": fname,
+                        "hf_path": f,
+                        "url": hf_hub_url(repo_id=repo_id, filename=f, repo_type="dataset"),
+                        "type": "DEEPFAKE",
+                        "description": f"Deepfake: {fname} ({source_label} face-swap)",
+                        "local_name": local_name,
+                        "is_downloaded": os.path.exists(os.path.join(CACHE_DIR, local_name))
+                                         and os.path.getsize(os.path.join(CACHE_DIR, local_name)) > 0
+                    })
+                # has_more = True as long as we have a pool to keep sampling from
+                has_more = len(all_fake_files) > 0
+        except Exception as e:
+            print(f"[HF] load-more DEEPFAKE error: {e}")
+            fresh, has_more = [], False
+
+
+    else:  # REAL — Kinetics400 with seeded shuffle
+        try:
+            from datasets import load_dataset  # type: ignore
+            seed = page * 137 + 42
+            ds = load_dataset("liuhuanjim013/kinetics400", split="train", streaming=True)
+            ds = ds.shuffle(seed=seed, buffer_size=500)
+            for item in itertools.islice(ds, PAGE_SIZE):
+                clip_name = item.get("clip_name", f"kinetics_p{page}")
+                if not clip_name.endswith('.mp4'):
+                    clip_name += '.mp4'
+                url   = item.get("video link", "")
+                hf_path = None
+                if url and "resolve/main/" in url:
+                    hf_path = urllib.parse.unquote(url.split("resolve/main/")[-1])
+                vid_id = f"kinetics400_{clip_name.replace('.', '_')}_p{page}"
+                local_name = f"real_{clip_name}"
+                fresh.append({
+                    "id": vid_id,
+                    "repo_id": "liuhuanjim013/kinetics400" if hf_path else None,
+                    "name": clip_name,
+                    "hf_path": hf_path,
+                    "url": url,
+                    "type": "REAL",
+                    "description": f"Real: {item.get('action_class', 'Kinetics400')}",
+                    "local_name": local_name,
+                    "is_downloaded": os.path.exists(os.path.join(CACHE_DIR, local_name))
+                                     and os.path.getsize(os.path.join(CACHE_DIR, local_name)) > 0
+                })
+            has_more = True   # Kinetics is enormous — always more
+        except Exception as e:
+            print(f"[HF] load-more REAL error: {e}")
+            fresh, has_more = [], False
+
+    # Also register new entries in the in-memory cache so /download-remote-video can find them
+    if fresh:
+        with _cache_lock:
+            existing_ids = {v['id'] for v in _video_cache}
+            _video_cache.extend([v for v in fresh if v['id'] not in existing_ids])
+
+    return {"videos": fresh, "page": page, "has_more": has_more}
 
 class DownloadRequest(BaseModel):
     video_id: str
