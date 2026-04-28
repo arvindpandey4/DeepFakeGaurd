@@ -87,6 +87,82 @@ async def analyze_video(file: UploadFile = File(...)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
+
+@app.post("/analyze/explain")
+async def analyze_with_explanation(file: UploadFile = File(...), top_k: int = 5):
+    """
+    Upload a video and get prediction with Grad-CAM explainability heatmaps.
+    Shows which pixels contributed most to the deepfake decision.
+    """
+    if not file.content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="File must be a video")
+
+    # Generate unique filename
+    file_id = str(uuid.uuid4())
+    extension = os.path.splitext(file.filename)[1]
+    filename = f"{file_id}{extension}"
+    file_path = os.path.join(UPLOAD_DIR, filename)
+
+    # Save uploaded file
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
+
+    try:
+        # Run prediction with explainability
+        result = pipeline.predict_with_explanation(file_path, top_k=top_k)
+        
+        # Add relative URL for the video
+        result["video_url"] = f"/uploads/{filename}"
+        result["filename"] = file.filename
+        
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Explainability analysis failed: {str(e)}")
+
+
+@app.post("/analyze/temporal")
+async def analyze_with_temporal(file: UploadFile = File(...)):
+    """
+    Upload a video and get prediction with temporal consistency analysis.
+    Detects flickering and frame-to-frame inconsistencies typical of deepfakes.
+    """
+    if not file.content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="File must be a video")
+
+    # Generate unique filename
+    file_id = str(uuid.uuid4())
+    extension = os.path.splitext(file.filename)[1]
+    filename = f"{file_id}{extension}"
+    file_path = os.path.join(UPLOAD_DIR, filename)
+
+    # Save uploaded file
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
+
+    try:
+        # Run prediction with temporal analysis
+        result = pipeline.predict_with_temporal(file_path)
+        
+        # Add relative URL for the video
+        result["video_url"] = f"/uploads/{filename}"
+        result["filename"] = file.filename
+        
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Temporal analysis failed: {str(e)}")
+
 # --- Dynamic Hugging Face Integration ---
 
 UNIDATAPRO_REPO = "UniDataPro/deepfake-videos-dataset"
@@ -492,6 +568,62 @@ def analyze_demo_video(request: DemoRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+
+@app.post("/analyze-demo/explain")
+def analyze_demo_with_explanation(request: DemoRequest, top_k: int = 5):
+    """Analyze a cached video with Grad-CAM explainability"""
+    file_path = os.path.join(CACHE_DIR, request.path_id)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Video not found in cache")
+        
+    try:
+        # Run pipeline with explainability
+        result = pipeline.predict_with_explanation(file_path, top_k=top_k)
+        
+        filename = os.path.basename(file_path)
+        upload_path = os.path.join(UPLOAD_DIR, filename)
+        if not os.path.exists(upload_path):
+            shutil.copy2(file_path, upload_path)
+            
+        result["video_url"] = f"/uploads/{filename}"
+        result["filename"] = filename
+        
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Explainability analysis failed: {str(e)}")
+
+
+@app.post("/analyze-demo/temporal")
+def analyze_demo_with_temporal(request: DemoRequest):
+    """Analyze a cached video with temporal consistency analysis"""
+    file_path = os.path.join(CACHE_DIR, request.path_id)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Video not found in cache")
+        
+    try:
+        # Run pipeline with temporal analysis
+        result = pipeline.predict_with_temporal(file_path)
+        
+        filename = os.path.basename(file_path)
+        upload_path = os.path.join(UPLOAD_DIR, filename)
+        if not os.path.exists(upload_path):
+            shutil.copy2(file_path, upload_path)
+            
+        result["video_url"] = f"/uploads/{filename}"
+        result["filename"] = filename
+        
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Temporal analysis failed: {str(e)}")
 
 
 @app.post("/clear-cache")

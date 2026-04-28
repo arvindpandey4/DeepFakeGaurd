@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, X, Check, AlertTriangle, Play, Shield, ShieldAlert, Cpu, Activity, Clock, Database, ChevronRight, DownloadCloud, RefreshCw, Trash2 } from 'lucide-react';
+import { Upload, X, Check, AlertTriangle, Play, Shield, ShieldAlert, Cpu, Activity, Clock, Database, ChevronRight, DownloadCloud, RefreshCw, Trash2, Zap, TrendingUp, Eye } from 'lucide-react';
 
 // API Configuration
 const API_URL = "http://localhost:8000";
@@ -12,6 +12,7 @@ function App() {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [result, setResult] = useState(null);
     const [error, setError] = useState(null);
+    const [analysisMode, setAnalysisMode] = useState('standard'); // 'standard', 'explain', 'temporal'
     const [demoVideos, setDemoVideos] = useState([]);
     const [availableRemoteVideos, setAvailableRemoteVideos] = useState([]);
     const [isDownloading, setIsDownloading] = useState(false);
@@ -138,7 +139,15 @@ function App() {
         formData.append("file", file);
 
         try {
-            const response = await axios.post(`${API_URL}/analyze`, formData, {
+            // Choose endpoint based on analysis mode
+            let endpoint = `${API_URL}/analyze`;
+            if (analysisMode === 'explain') {
+                endpoint = `${API_URL}/analyze/explain?top_k=3`;
+            } else if (analysisMode === 'temporal') {
+                endpoint = `${API_URL}/analyze/temporal`;
+            }
+
+            const response = await axios.post(endpoint, formData, {
                 headers: { "Content-Type": "multipart/form-data" },
             });
             // Delay for UI effect
@@ -162,7 +171,15 @@ function App() {
         setIsAnalyzing(true);
 
         try {
-            const response = await axios.post(`${API_URL}/analyze-demo`, {
+            // Choose endpoint based on analysis mode
+            let endpoint = `${API_URL}/analyze-demo`;
+            if (analysisMode === 'explain') {
+                endpoint = `${API_URL}/analyze-demo/explain?top_k=3`;
+            } else if (analysisMode === 'temporal') {
+                endpoint = `${API_URL}/analyze-demo/temporal`;
+            }
+
+            const response = await axios.post(endpoint, {
                 path_id: video.path_id
             });
 
@@ -305,7 +322,9 @@ function App() {
                                         >
                                             <div className="absolute top-0 left-0 w-full h-1 bg-cyan-400 shadow-[0_0_20px_rgba(34,211,238,0.8)] animate-scan" />
                                             <div className="absolute top-4 left-4 font-mono text-xs text-cyan-400 bg-black/50 px-2 py-1 rounded border border-cyan-500/30">
-                                                SCANNING FRAMES...
+                                                {analysisMode === 'explain' ? 'GENERATING HEATMAPS...' : 
+                                                 analysisMode === 'temporal' ? 'ANALYZING TEMPORAL...' : 
+                                                 'SCANNING FRAMES...'}
                                             </div>
                                             <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20" />
                                         </motion.div>
@@ -378,35 +397,44 @@ function App() {
                                 <motion.div
                                     initial={{ opacity: 0, y: 20 }}
                                     animate={{ opacity: 1, y: 0 }}
-                                    className="bg-white/5 border border-white/10 rounded-2xl p-6"
+                                    className="space-y-6"
                                 >
-                                    <div className="flex justify-between items-center mb-6">
-                                        <h3 className="text-sm font-medium text-neutral-400 uppercase tracking-wider">Pipeline Execution Path</h3>
-                                        <div className="text-xs font-mono text-neutral-500">
-                                            ID: {result.filename}
+                                    {/* Pipeline Execution Path */}
+                                    <div className="bg-white/5 border border-white/10 rounded-2xl p-6">
+                                        <div className="flex justify-between items-center mb-6">
+                                            <h3 className="text-sm font-medium text-neutral-400 uppercase tracking-wider">Pipeline Execution Path</h3>
+                                            <div className="text-xs font-mono text-neutral-500">
+                                                ID: {result.filename}
+                                            </div>
+                                        </div>
+
+                                        <div className="space-y-6 relative">
+                                            <div className="absolute left-[19px] top-2 bottom-4 w-0.5 bg-white/10 z-0" />
+
+                                            <PipelineStep
+                                                number="1"
+                                                status="completed"
+                                                data={result.stage_results}
+                                                isExit={result.exit_stage === 1}
+                                            />
+                                            <PipelineStep
+                                                number="2"
+                                                status={result.exit_stage >= 2 ? "completed" : "skipped"}
+                                                isExit={result.exit_stage === 2}
+                                            />
+                                            <PipelineStep
+                                                number="3"
+                                                status={result.exit_stage >= 3 ? "completed" : "skipped"}
+                                                isExit={result.exit_stage === 3}
+                                            />
                                         </div>
                                     </div>
 
-                                    <div className="space-y-6 relative">
-                                        <div className="absolute left-[19px] top-2 bottom-4 w-0.5 bg-white/10 z-0" />
+                                    {/* Heatmap Gallery (if explainability mode) */}
+                                    {result.explanations && <HeatmapGallery explanations={result.explanations} />}
 
-                                        <PipelineStep
-                                            number="1"
-                                            status="completed"
-                                            data={result.stage_results}
-                                            isExit={result.exit_stage === 1}
-                                        />
-                                        <PipelineStep
-                                            number="2"
-                                            status={result.exit_stage >= 2 ? "completed" : "skipped"}
-                                            isExit={result.exit_stage === 2}
-                                        />
-                                        <PipelineStep
-                                            number="3"
-                                            status={result.exit_stage >= 3 ? "completed" : "skipped"}
-                                            isExit={result.exit_stage === 3}
-                                        />
-                                    </div>
+                                    {/* Temporal Chart (if temporal mode) */}
+                                    {result.temporal_analysis && <TemporalChart temporal_analysis={result.temporal_analysis} />}
                                 </motion.div>
                             )}
                         </AnimatePresence>
@@ -484,6 +512,8 @@ function App() {
                             demoVideos={demoVideos}
                             isAnalyzing={isAnalyzing}
                             runDemoVideo={runDemoVideo}
+                            analysisMode={analysisMode}
+                            setAnalysisMode={setAnalysisMode}
                         />
                     </div>
 
@@ -683,7 +713,7 @@ function App() {
     );
 }
 
-function DataIngestionPanel({ demoVideos, isAnalyzing, runDemoVideo }) {
+function DataIngestionPanel({ demoVideos, isAnalyzing, runDemoVideo, analysisMode, setAnalysisMode }) {
     const [demoTab, setDemoTab] = useState('REAL');
     const [demoPage, setDemoPage] = useState({ REAL: 0, DEEPFAKE: 0 });
     const DEMO_PAGE = 5;
@@ -697,14 +727,61 @@ function DataIngestionPanel({ demoVideos, isAnalyzing, runDemoVideo }) {
     return (
         <div className="bg-neutral-900/50 border border-white/5 rounded-3xl overflow-hidden backdrop-blur-sm">
             {/* Header */}
-            <div className="p-5 border-b border-white/5 flex justify-between items-center">
-                <h3 className="font-medium text-white flex items-center gap-2">
-                    <Database className="w-4 h-4 text-cyan-400" />
-                    Data Ingestion
-                </h3>
-                <div className="flex gap-2 text-[10px] text-neutral-500 font-mono">
-                    <span className="flex items-center gap-1"><div className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {demoVideos.filter(v => v.type === 'REAL').length}R</span>
-                    <span className="flex items-center gap-1"><div className="w-1.5 h-1.5 rounded-full bg-red-500" /> {demoVideos.filter(v => v.type === 'DEEPFAKE').length}F</span>
+            <div className="p-5 border-b border-white/5">
+                <div className="flex justify-between items-center mb-4">
+                    <h3 className="font-medium text-white flex items-center gap-2">
+                        <Database className="w-4 h-4 text-cyan-400" />
+                        Data Ingestion
+                    </h3>
+                    <div className="flex gap-2 text-[10px] text-neutral-500 font-mono">
+                        <span className="flex items-center gap-1"><div className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {demoVideos.filter(v => v.type === 'REAL').length}R</span>
+                        <span className="flex items-center gap-1"><div className="w-1.5 h-1.5 rounded-full bg-red-500" /> {demoVideos.filter(v => v.type === 'DEEPFAKE').length}F</span>
+                    </div>
+                </div>
+                
+                {/* Analysis Mode Selector */}
+                <div className="space-y-2">
+                    <div className="text-xs text-neutral-400 uppercase tracking-wider font-medium">Analysis Mode</div>
+                    <div className="flex bg-white/5 rounded-xl p-1 border border-white/10">
+                        <button
+                            onClick={() => setAnalysisMode('standard')}
+                            className={`flex-1 px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                                analysisMode === 'standard'
+                                    ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/25'
+                                    : 'text-neutral-400 hover:text-white hover:bg-white/5'
+                            }`}
+                        >
+                            <Zap className="w-3.5 h-3.5" />
+                            Standard
+                        </button>
+                        <button
+                            onClick={() => setAnalysisMode('explain')}
+                            className={`flex-1 px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                                analysisMode === 'explain'
+                                    ? 'bg-purple-500 text-white shadow-lg shadow-purple-500/25'
+                                    : 'text-neutral-400 hover:text-white hover:bg-white/5'
+                            }`}
+                        >
+                            <Eye className="w-3.5 h-3.5" />
+                            Heatmap
+                        </button>
+                        <button
+                            onClick={() => setAnalysisMode('temporal')}
+                            className={`flex-1 px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                                analysisMode === 'temporal'
+                                    ? 'bg-orange-500 text-white shadow-lg shadow-orange-500/25'
+                                    : 'text-neutral-400 hover:text-white hover:bg-white/5'
+                            }`}
+                        >
+                            <TrendingUp className="w-3.5 h-3.5" />
+                            Temporal
+                        </button>
+                    </div>
+                    <div className="text-[10px] text-neutral-500 text-center">
+                        {analysisMode === 'standard' && "Fast adaptive detection with confidence scoring"}
+                        {analysisMode === 'explain' && "Visual heatmaps showing manipulation regions (~5-8s)"}
+                        {analysisMode === 'temporal' && "Frame-by-frame consistency analysis (~4-6s)"}
+                    </div>
                 </div>
             </div>
 
@@ -848,6 +925,198 @@ function PipelineStep({ number, status, isExit }) {
             </div>
         </div>
     )
+}
+
+// NEW: Heatmap Gallery Component
+function HeatmapGallery({ explanations }) {
+    const [selectedIdx, setSelectedIdx] = useState(0);
+
+    if (!explanations || explanations.length === 0) return null;
+
+    const selected = explanations[selectedIdx];
+
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4"
+        >
+            <div className="flex justify-between items-center">
+                <h3 className="text-sm font-medium text-neutral-400 uppercase tracking-wider flex items-center gap-2">
+                    <Eye className="w-4 h-4 text-purple-400" />
+                    Explainability Heatmaps
+                </h3>
+                <span className="text-xs text-neutral-500 font-mono">
+                    {explanations.length} suspicious frames
+                </span>
+            </div>
+
+            {/* Main Heatmap Display */}
+            <div className="relative aspect-video rounded-xl overflow-hidden border border-white/10 bg-black">
+                <img
+                    src={selected.overlay}
+                    alt={`Heatmap for frame ${selected.frame_idx}`}
+                    className="w-full h-full object-contain"
+                />
+                <div className="absolute bottom-3 left-3 bg-black/70 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-white/20">
+                    <p className="text-xs text-white font-mono">
+                        Frame {selected.frame_idx} • {(selected.score * 100).toFixed(1)}% fake
+                    </p>
+                </div>
+            </div>
+
+            {/* Thumbnail Strip */}
+            <div className="flex gap-2 overflow-x-auto pb-2">
+                {explanations.map((exp, idx) => (
+                    <button
+                        key={idx}
+                        onClick={() => setSelectedIdx(idx)}
+                        className={`flex-shrink-0 w-24 h-16 rounded-lg overflow-hidden border-2 transition-all ${
+                            selectedIdx === idx
+                                ? 'border-purple-500 shadow-lg shadow-purple-500/25'
+                                : 'border-white/10 hover:border-white/30'
+                        }`}
+                    >
+                        <img
+                            src={exp.heatmap}
+                            alt={`Frame ${exp.frame_idx}`}
+                            className="w-full h-full object-cover"
+                        />
+                    </button>
+                ))}
+            </div>
+
+            <p className="text-xs text-neutral-500 text-center italic">
+                Red/yellow regions indicate high manipulation probability
+            </p>
+        </motion.div>
+    );
+}
+
+// NEW: Temporal Chart Component
+function TemporalChart({ temporal_analysis }) {
+    if (!temporal_analysis) return null;
+
+    const { frame_scores, timestamps, smoothed_scores, stability_score, is_flickering, variance, threshold_crossings, interpretation } = temporal_analysis;
+
+    // Simple SVG line chart (optimized)
+    const width = 500;  // Reduced from 600
+    const height = 150; // Reduced from 200
+    const padding = 30; // Reduced from 40
+    const chartWidth = width - 2 * padding;
+    const chartHeight = height - 2 * padding;
+
+    const maxTime = Math.max(...timestamps);
+    const points = frame_scores.map((score, i) => {
+        const x = padding + (timestamps[i] / maxTime) * chartWidth;
+        const y = padding + (1 - score) * chartHeight;
+        return `${x},${y}`;
+    }).join(' ');
+
+    const smoothPoints = smoothed_scores.map((score, i) => {
+        const x = padding + (timestamps[i] / maxTime) * chartWidth;
+        const y = padding + (1 - score) * chartHeight;
+        return `${x},${y}`;
+    }).join(' ');
+
+    // Threshold line at 0.5
+    const thresholdY = padding + (1 - 0.5) * chartHeight;
+
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4"
+        >
+            <div className="flex justify-between items-center">
+                <h3 className="text-sm font-medium text-neutral-400 uppercase tracking-wider flex items-center gap-2">
+                    <TrendingUp className="w-4 h-4 text-orange-400" />
+                    Temporal Consistency Analysis
+                </h3>
+                <span className={`text-xs font-bold px-2 py-1 rounded ${
+                    is_flickering ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'
+                }`}>
+                    {is_flickering ? 'FLICKERING DETECTED' : 'STABLE'}
+                </span>
+            </div>
+
+            {/* Chart */}
+            <div className="bg-black/30 rounded-xl p-4 border border-white/5">
+                <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
+                    {/* Grid lines */}
+                    <line x1={padding} y1={padding} x2={padding} y2={height - padding} stroke="#444" strokeWidth="1" />
+                    <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#444" strokeWidth="1" />
+                    
+                    {/* Threshold line */}
+                    <line x1={padding} y1={thresholdY} x2={width - padding} y2={thresholdY} stroke="#666" strokeWidth="1" strokeDasharray="4" />
+                    <text x={width - padding + 5} y={thresholdY + 4} fill="#888" fontSize="10">0.5</text>
+                    
+                    {/* Smoothed line (background) */}
+                    <polyline
+                        points={smoothPoints}
+                        fill="none"
+                        stroke="#06b6d4"
+                        strokeWidth="2"
+                        opacity="0.3"
+                    />
+                    
+                    {/* Raw scores line */}
+                    <polyline
+                        points={points}
+                        fill="none"
+                        stroke="#06b6d4"
+                        strokeWidth="2"
+                    />
+                    
+                    {/* Axis labels */}
+                    <text x={width / 2} y={height - 10} fill="#888" fontSize="12" textAnchor="middle">Time (seconds)</text>
+                    <text x={15} y={height / 2} fill="#888" fontSize="12" textAnchor="middle" transform={`rotate(-90 15 ${height / 2})`}>Deepfake Probability</text>
+                </svg>
+            </div>
+
+            {/* Metrics Grid */}
+            <div className="grid grid-cols-2 gap-3">
+                <div className="bg-white/5 border border-white/10 p-3 rounded-xl">
+                    <div className="text-[10px] text-neutral-400 uppercase font-medium mb-1">Stability Score</div>
+                    <div className="text-2xl font-display font-bold text-white">{(stability_score * 100).toFixed(0)}%</div>
+                    <div className="w-full bg-white/10 h-1.5 rounded-full mt-2 overflow-hidden">
+                        <div
+                            className={`h-full rounded-full transition-all ${
+                                stability_score > 0.7 ? 'bg-emerald-500' : stability_score > 0.4 ? 'bg-orange-500' : 'bg-red-500'
+                            }`}
+                            style={{ width: `${stability_score * 100}%` }}
+                        />
+                    </div>
+                </div>
+                <div className="bg-white/5 border border-white/10 p-3 rounded-xl">
+                    <div className="text-[10px] text-neutral-400 uppercase font-medium mb-1">Variance</div>
+                    <div className="text-2xl font-display font-bold text-white">{variance.toFixed(4)}</div>
+                    <div className="text-[10px] text-neutral-500 mt-1">
+                        {variance > 0.05 ? 'High (unstable)' : 'Low (stable)'}
+                    </div>
+                </div>
+                <div className="bg-white/5 border border-white/10 p-3 rounded-xl">
+                    <div className="text-[10px] text-neutral-400 uppercase font-medium mb-1">Threshold Crossings</div>
+                    <div className="text-2xl font-display font-bold text-white">{threshold_crossings}</div>
+                    <div className="text-[10px] text-neutral-500 mt-1">
+                        Real ↔ Fake flips
+                    </div>
+                </div>
+                <div className="bg-white/5 border border-white/10 p-3 rounded-xl">
+                    <div className="text-[10px] text-neutral-400 uppercase font-medium mb-1">Frames Analyzed</div>
+                    <div className="text-2xl font-display font-bold text-white">{frame_scores.length}</div>
+                    <div className="text-[10px] text-neutral-500 mt-1">
+                        Total samples
+                    </div>
+                </div>
+            </div>
+
+            {/* Interpretation */}
+            <div className="bg-orange-500/10 border border-orange-500/20 rounded-xl p-3">
+                <p className="text-xs text-orange-300 font-medium">{interpretation}</p>
+            </div>
+        </motion.div>
+    );
 }
 
 export default App;

@@ -45,6 +45,16 @@ try:
 except ImportError:
     from pipeline.frequency_detector import compute_frequency_score  # type: ignore
 
+try:
+    from .explainability import generate_explanation_for_frames  # type: ignore
+except ImportError:
+    from pipeline.explainability import generate_explanation_for_frames  # type: ignore
+
+try:
+    from .temporal_analyzer import analyze_temporal_consistency  # type: ignore
+except ImportError:
+    from pipeline.temporal_analyzer import analyze_temporal_consistency  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Ensemble weights: how much to trust each signal
@@ -258,6 +268,84 @@ class AdaptivePipeline:
         print(f"  [Ensemble] Final p(s) = {p_s:.4f}  "
               f"(deepfake prob; spatial×{_SPATIAL_WEIGHT} + freq×{_FREQUENCY_WEIGHT})")
         return p_s
+
+    def _predict_frames_with_details(self, frames: np.ndarray, sample_rate: int = 3) -> Tuple[float, np.ndarray, np.ndarray]:
+        """
+        Enhanced prediction that returns per-frame scores and processed frames
+        Used for explainability and temporal analysis
+        
+        Args:
+            sample_rate: For temporal analysis, sample every Nth frame for speed
+        
+        Returns:
+            Tuple of (aggregated_score, per_frame_scores, processed_frames)
+        """
+        # For temporal analysis, sample frames to reduce processing time
+        if sample_rate > 1 and len(frames) > 10:
+            sampled_indices = np.arange(0, len(frames), sample_rate)
+            frames_to_process = frames[sampled_indices]
+        else:
+            frames_to_process = frames
+            sampled_indices = np.arange(len(frames))
+        # Step 1 — resize / sharpen / normalise
+        target_res = (256, 256)
+        processed = preprocess_frames(frames_to_process, target_shape=target_res,
+                                      normalize=True, sharpen=True)
+
+        # Step 2 — MesoNet on original orientation (keep per-frame scores)
+        preds_orig = self._run_model_on_frames(processed)
+        
+        # Step 3 — TTA: horizontal flip
+        flipped = np.array([np.fliplr(f) for f in processed])
+        preds_flip = self._run_model_on_frames(flipped)
+        
+        # Step 4 — average original + flipped per-frame (still real_prob)
+        per_frame_real = (preds_orig.flatten() + preds_flip.flatten()) / 2.0
+        
+        # Step 5 — convert per-frame real_prob → deepfake_prob
+        per_frame_fake = np.array([normalize_to_fake_prob(score, mode="real_prob") 
+                                   for score in per_frame_real])
+        
+        # If we sampled frames, expand back to original length for temporal analysis
+        if sample_rate > 1 and len(frames) > 10:
+            # Interpolate scores for missing frames
+            full_per_frame_fake = np.interp(
+                np.arange(len(frames)), 
+                sampled_indices, 
+                per_frame_fake
+            )
+        else:
+            full_per_frame_fake = per_frame_fake
+        
+        # Step 6 — frequency domain score (aggregate only)
+        raw_frames = preprocess_frames(frames_to_process, target_shape=target_res,
+                                       normalize=False, sharpen=False)
+        freq_score_real = compute_frequency_score(raw_frames)
+        p_fake_freq = normalize_to_fake_prob(freq_score_real, mode="real_prob")
+        
+        # Step 7 — aggregate spatial score (use original frames for final score)
+        all_processed = preprocess_frames(frames, target_shape=target_res,
+                                          normalize=True, sharpen=True)
+        all_preds_orig = self._run_model_on_frames(all_processed)
+        all_flipped = np.array([np.fliplr(f) for f in all_processed])
+        all_preds_flip = self._run_model_on_frames(all_flipped)
+        
+        spatial_score_real = self._aggregate_predictions(all_preds_orig)
+        spatial_flip_real = self._aggregate_predictions(all_preds_flip)
+        spatial_avg_real = (spatial_score_real + spatial_flip_real) / 2.0
+        p_fake_spatial = normalize_to_fake_prob(spatial_avg_real, mode="real_prob")
+        
+        # Step 8 — ensemble for final aggregated score
+        ensemble = _SPATIAL_WEIGHT * p_fake_spatial + _FREQUENCY_WEIGHT * p_fake_freq
+        p_s = float(np.clip(ensemble, 0.001, 0.999))
+        
+        print(f"  [CNN] p_fake_spatial = {p_fake_spatial:.4f}")
+        print(f"  [FreqEnsemble] p_fake_freq = {p_fake_freq:.4f}")
+        print(f"  [Ensemble] Final p(s) = {p_s:.4f}")
+        print(f"  [PerFrame] Scores range: [{full_per_frame_fake.min():.3f}, {full_per_frame_fake.max():.3f}]")
+        print(f"  [Optimization] Processed {len(frames_to_process)}/{len(frames)} frames")
+        
+        return p_s, full_per_frame_fake, processed
     
     def _process_stage(self, 
                         video_path: str, 
@@ -443,6 +531,229 @@ class AdaptivePipeline:
             'stage3_exits': 0,
             'total_time': 0,
             'stage_times': {1: 0, 2: 0, 3: 0}
+        }
+
+    def predict_with_explanation(self, video_path: str, top_k: int = 5) -> Dict:
+        """
+        Predict with Grad-CAM explainability heatmaps
+        
+        Args:
+            video_path: Path to video file
+            top_k: Number of most suspicious frames to explain
+            
+        Returns:
+            Dictionary with prediction results + heatmap explanations
+        """
+        total_start = time.time()
+        
+        print(f"\n{'#'*70}")
+        print(f"ADAPTIVE PIPELINE WITH EXPLAINABILITY")
+        print(f"{'#'*70}")
+        print(f"Video: {os.path.basename(video_path)}")
+        
+        # Run through stages until exit
+        final_result: Dict[str, Any] = {'label': 'UNKNOWN', 'p_s': 0.0, 'confidence': 0.0}
+        exit_stage: int = 0
+        all_frames: List[np.ndarray] = []
+        all_processed: List[np.ndarray] = []
+        all_scores: List[np.ndarray] = []
+        
+        for stage_num in [1, 2, 3]:
+            stage_config = get_stage_config(stage_num)
+            stage_start = time.time()
+            
+            if PIPELINE_CONFIG['verbose']:
+                print(f"\n[STAGE {stage_num}] {stage_config['name']}")
+            
+            # Extract frames
+            with FrameExtractor(video_path) as extractor:
+                frames = extractor.extract_frames_adaptive(stage_config)
+            
+            # Get detailed predictions
+            p_s, per_frame_scores, processed_frames = self._predict_frames_with_details(frames)
+            
+            # Store for explanation generation
+            all_frames.append(frames)
+            all_processed.append(processed_frames)
+            all_scores.append(per_frame_scores)
+            
+            # Confidence and exit logic
+            confidence_magnitude = max(p_s, 1.0 - p_s)
+            tau_s = stage_config['confidence_threshold']
+            should_exit = (confidence_magnitude >= tau_s) or (stage_num == 3)
+            label = "DEEPFAKE" if p_s >= 0.5 else "REAL"
+            
+            stage_time = time.time() - stage_start
+            self.stats['stage_times'][stage_num] += stage_time
+            
+            if should_exit:
+                final_result = {
+                    'stage': stage_num,
+                    'p_s': p_s,
+                    'confidence': confidence_magnitude,
+                    'label': label,
+                    'time': stage_time,
+                    'frames_processed': len(frames),
+                    'should_exit': should_exit
+                }
+                exit_stage = stage_num
+                self.stats[f'stage{stage_num}_exits'] += 1
+                break
+        
+        total_time = time.time() - total_start
+        self.stats['total_videos'] += 1
+        self.stats['total_time'] += total_time
+        
+        # Generate explanations for the exit stage
+        exit_frames = all_frames[exit_stage - 1]
+        exit_processed = all_processed[exit_stage - 1]
+        exit_scores = all_scores[exit_stage - 1]
+        
+        print(f"\n[Explainability] Generating Grad-CAM heatmaps for top {top_k} frames...")
+        explanations = generate_explanation_for_frames(
+            self.model,
+            exit_processed,
+            exit_scores,
+            exit_frames,
+            top_k=min(top_k, len(exit_frames))
+        )
+        
+        f_label: str = str(final_result['label'])
+        f_p_s: float = float(final_result['p_s'])
+        f_conf: float = float(final_result['confidence'])
+        
+        print(f"\n{'='*60}")
+        print(f"FINAL RESULT WITH EXPLANATIONS")
+        print(f"{'='*60}")
+        print(f"  Prediction: {f_label}")
+        print(f"  Probability: {f_p_s:.4f}")
+        print(f"  Confidence: {f_conf:.4f}")
+        print(f"  Exit Stage: {exit_stage}")
+        print(f"  Explanations: {len(explanations)} heatmaps generated")
+        print(f"  Total Time: {total_time:.2f}s")
+        print(f"{'#'*70}\n")
+        
+        return {
+            'video': video_path,
+            'label': f_label,
+            'probability': f_p_s,
+            'confidence': f_conf,
+            'exit_stage': exit_stage,
+            'total_time': total_time,
+            'stage_results': final_result,
+            'explanations': explanations
+        }
+
+    def predict_with_temporal(self, video_path: str) -> Dict:
+        """
+        Predict with temporal consistency analysis
+        
+        Args:
+            video_path: Path to video file
+            
+        Returns:
+            Dictionary with prediction results + temporal analysis
+        """
+        total_start = time.time()
+        
+        print(f"\n{'#'*70}")
+        print(f"ADAPTIVE PIPELINE WITH TEMPORAL ANALYSIS")
+        print(f"{'#'*70}")
+        print(f"Video: {os.path.basename(video_path)}")
+        
+        # Run through stages until exit
+        final_result: Dict[str, Any] = {'label': 'UNKNOWN', 'p_s': 0.0, 'confidence': 0.0}
+        exit_stage: int = 0
+        all_frame_scores: List[float] = []
+        all_timestamps: List[float] = []
+        
+        for stage_num in [1, 2, 3]:
+            stage_config = get_stage_config(stage_num)
+            stage_start = time.time()
+            
+            if PIPELINE_CONFIG['verbose']:
+                print(f"\n[STAGE {stage_num}] {stage_config['name']}")
+            
+            # Extract frames
+            with FrameExtractor(video_path) as extractor:
+                frames = extractor.extract_frames_adaptive(stage_config)
+                video_info = extractor.get_video_info()
+            
+            # Get detailed predictions
+            p_s, per_frame_scores, _ = self._predict_frames_with_details(frames)
+            
+            # Calculate timestamps based on frame extraction rate
+            fps = stage_config['frames_per_second']
+            duration = video_info.get('duration', len(frames) / fps)
+            timestamps = np.linspace(0, duration, len(per_frame_scores))
+            
+            # Store for temporal analysis
+            all_frame_scores.extend(per_frame_scores.tolist())
+            all_timestamps.extend(timestamps.tolist())
+            
+            # Confidence and exit logic
+            confidence_magnitude = max(p_s, 1.0 - p_s)
+            tau_s = stage_config['confidence_threshold']
+            should_exit = (confidence_magnitude >= tau_s) or (stage_num == 3)
+            label = "DEEPFAKE" if p_s >= 0.5 else "REAL"
+            
+            stage_time = time.time() - stage_start
+            self.stats['stage_times'][stage_num] += stage_time
+            
+            if should_exit:
+                final_result = {
+                    'stage': stage_num,
+                    'p_s': p_s,
+                    'confidence': confidence_magnitude,
+                    'label': label,
+                    'time': stage_time,
+                    'frames_processed': len(frames),
+                    'should_exit': should_exit
+                }
+                exit_stage = stage_num
+                self.stats[f'stage{stage_num}_exits'] += 1
+                break
+        
+        total_time = time.time() - total_start
+        self.stats['total_videos'] += 1
+        self.stats['total_time'] += total_time
+        
+        # Perform temporal analysis
+        print(f"\n[Temporal] Analyzing frame-to-frame consistency...")
+        temporal_analysis = analyze_temporal_consistency(
+            np.array(all_frame_scores),
+            np.array(all_timestamps)
+        )
+        
+        f_label: str = str(final_result['label'])
+        f_p_s: float = float(final_result['p_s'])
+        f_conf: float = float(final_result['confidence'])
+        
+        print(f"\n{'='*60}")
+        print(f"FINAL RESULT WITH TEMPORAL ANALYSIS")
+        print(f"{'='*60}")
+        print(f"  Prediction: {f_label}")
+        print(f"  Probability: {f_p_s:.4f}")
+        print(f"  Confidence: {f_conf:.4f}")
+        print(f"  Exit Stage: {exit_stage}")
+        print(f"\n  Temporal Metrics:")
+        print(f"    Stability Score: {temporal_analysis['stability_score']:.4f}")
+        print(f"    Variance: {temporal_analysis['variance']:.4f}")
+        print(f"    Flickering: {temporal_analysis['is_flickering']}")
+        print(f"    Threshold Crossings: {temporal_analysis['threshold_crossings']}")
+        print(f"    {temporal_analysis['interpretation']}")
+        print(f"  Total Time: {total_time:.2f}s")
+        print(f"{'#'*70}\n")
+        
+        return {
+            'video': video_path,
+            'label': f_label,
+            'probability': f_p_s,
+            'confidence': f_conf,
+            'exit_stage': exit_stage,
+            'total_time': total_time,
+            'stage_results': final_result,
+            'temporal_analysis': temporal_analysis
         }
 
 
