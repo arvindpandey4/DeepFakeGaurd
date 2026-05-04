@@ -1,22 +1,17 @@
-"""
-Multi-Stage Adaptive Inference Pipeline for Deepfake Detection
-"""
-
-import numpy as np # type: ignore
+import numpy as np
 import time
 import os
 import sys
-import requests  # type: ignore
+import requests
 from typing import Dict, List, Tuple, Any, Optional, Union
 
-# Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from models.mesonet import Meso4, MesoInception4 # type: ignore
+    from models.mesonet import Meso4, MesoInception4
 except ImportError:
     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-    from models.mesonet import Meso4, MesoInception4 # type: ignore
+    from models.mesonet import Meso4, MesoInception4
 
 try:
     from .config import (
@@ -36,89 +31,49 @@ except ImportError:
     )
 
 try:
-    from .frame_extractor import FrameExtractor, preprocess_frames # type: ignore
+    from .frame_extractor import FrameExtractor, preprocess_frames
 except ImportError:
-    from pipeline.frame_extractor import FrameExtractor, preprocess_frames # type: ignore
+    from pipeline.frame_extractor import FrameExtractor, preprocess_frames
 
 try:
-    from .frequency_detector import compute_frequency_score  # type: ignore
+    from .frequency_detector import compute_frequency_score
 except ImportError:
-    from pipeline.frequency_detector import compute_frequency_score  # type: ignore
+    from pipeline.frequency_detector import compute_frequency_score
 
 try:
-    from .explainability import generate_explanation_for_frames  # type: ignore
+    from .explainability import generate_explanation_for_frames
 except ImportError:
-    from pipeline.explainability import generate_explanation_for_frames  # type: ignore
+    from pipeline.explainability import generate_explanation_for_frames
 
 try:
-    from .temporal_analyzer import analyze_temporal_consistency  # type: ignore
+    from .temporal_analyzer import analyze_temporal_consistency
 except ImportError:
-    from pipeline.temporal_analyzer import analyze_temporal_consistency  # type: ignore
+    from pipeline.temporal_analyzer import analyze_temporal_consistency
 
 
-# ---------------------------------------------------------------------------
-# Ensemble weights: how much to trust each signal
-# ---------------------------------------------------------------------------
-_SPATIAL_WEIGHT    = 0.70   # MesoNet CNN spatial score
-_FREQUENCY_WEIGHT  = 0.30   # FFT frequency-domain score
+_SPATIAL_WEIGHT    = 0.70
+_FREQUENCY_WEIGHT  = 0.30
 
 
-# ---------------------------------------------------------------------------
-# Probability normalisation utility  (Task 7 from paper alignment spec)
-# ---------------------------------------------------------------------------
 def normalize_to_fake_prob(score: float, mode: str = "real_prob") -> float:
-    """
-    Convert any detector output to a **deepfake probability** before
-    ensemble fusion.  This is the single choke-point for probability
-    semantics — all detectors must pass through here.
-
-    Args:
-        score: Raw detector output, already in [0, 1].
-        mode:  "real_prob"  → detector output is P(real);  return 1 - score
-               "fake_prob"  → detector output is P(fake);  return score as-is
-
-    Returns:
-        p_fake ∈ [0.001, 0.999]  (clamped for numerical stability)
-    """
     if mode == "real_prob":
         p_fake = 1.0 - score
     elif mode == "fake_prob":
         p_fake = score
     else:
         raise ValueError(f"normalize_to_fake_prob: unknown mode '{mode}'")
-    # Clamp to (0, 1) open interval — prevents log(0) / division issues
     return float(np.clip(p_fake, 0.001, 0.999))
 
-# URL for the more accurate MesoInception4 weights (official MesoNet repo)
 _INCEPTION_WEIGHTS_URL = (
     "https://github.com/DariusAf/MesoNet/raw/master/weights/MesoInception4_DF.h5"
 )
 
 
 class AdaptivePipeline:
-    """
-    Multi-Stage Adaptive Inference Pipeline — Enhanced Edition
-
-    Improvements over the baseline:
-      1. MesoInception4 architecture (auto-downloaded on first run) — more
-         accurate than Meso4, uses Inception modules for multi-scale features.
-      2. Frequency-domain ensemble — FFT-based GAN artifact detector runs in
-         parallel with MesoNet and is blended into the final score (30%).
-      3. Test-Time Augmentation (TTA) — each batch is also run on horizontally
-         flipped frames; scores are averaged, reducing prediction variance.
-      4. Trimmed-mean aggregation — top/bottom 15% frame scores are discarded
-         before averaging, preventing outlier frames from dominating.
-      5. Unsharp-mask sharpening — applied before model inference to expose
-         GAN blending seams that normal pixel averages smooth away.
-    """
-
     def __init__(self, weights_path: Optional[str] = None, model_type: str = "MesoInception4"):
         self.model_type: str = model_type
-
-        # Prefer MesoInception4 weights; fall back to Meso4 if absent
         self.weights_path: str = weights_path or WEIGHTS_PATH
         self._maybe_upgrade_to_inception()
-
         self.model: Optional[Union[Meso4, MesoInception4]] = None
 
         self.stats: Dict[str, Any] = {
@@ -132,15 +87,7 @@ class AdaptivePipeline:
 
         self._load_model()
 
-    # ------------------------------------------------------------------
-    # Weight management
-    # ------------------------------------------------------------------
-
     def _maybe_upgrade_to_inception(self) -> None:
-        """
-        If MesoInception4_DF.h5 is not present, attempt to download it.
-        Falls back to Meso4 silently if the download fails.
-        """
         weights_dir = os.path.dirname(self.weights_path)
         inception_path = os.path.join(weights_dir, "MesoInception4_DF.h5")
 
@@ -166,7 +113,6 @@ class AdaptivePipeline:
             self.model_type = "Meso4"
     
     def _load_model(self):
-        """Load the MesoNet model (Meso4 or MesoInception4)"""
         print(f"Loading {self.model_type} model...")
 
         if self.model_type == "MesoInception4":
@@ -187,12 +133,7 @@ class AdaptivePipeline:
             print(f"⚠ Warning: Weights not found at {self.weights_path}")
             print("  Model will use random initialization (for demo purposes)")
 
-    # ------------------------------------------------------------------
-    # Core inference helpers
-    # ------------------------------------------------------------------
-
     def _run_model_on_frames(self, frames: np.ndarray) -> np.ndarray:
-        """Run the CNN on pre-processed float32 frames, return raw predictions."""
         model = self.model
         if model is None:
             raise RuntimeError("Model used before initialization")
@@ -200,10 +141,6 @@ class AdaptivePipeline:
         return model.predict(frames, batch_size=batch_size, verbose=0)
 
     def _aggregate_predictions(self, preds: np.ndarray) -> float:
-        """
-        Trimmed-mean aggregation: discard the top and bottom 15% frame scores
-        (handles scene-cut frames, partial faces, etc.) then average the rest.
-        """
         flat = preds.flatten()
         if len(flat) >= 4:
             lo = np.percentile(flat, 15)
@@ -214,101 +151,57 @@ class AdaptivePipeline:
         return float(np.mean(flat))
 
     def _predict_frames(self, frames: np.ndarray) -> float:
-        """
-        Full prediction pipeline for a batch of face-cropped frames:
-          1. Sharpen + resize to 256×256 + normalise
-          2. Run MesoNet (spatial score)  — outputs real_prob by convention
-          3. Run MesoNet on horizontally flipped frames (TTA)
-          4. Average original + flipped spatial scores
-          5. Convert spatial real_prob → fake_prob via normalize_to_fake_prob()
-          6. Compute frequency-domain score (FFT)  — also real_prob
-          7. Convert frequency real_prob → fake_prob via normalize_to_fake_prob()
-          8. Ensemble: p(s) = w_spatial·p_fake_spatial + w_freq·p_fake_freq
-
-        Returns:
-            p(s) ∈ [0.001, 0.999]  — DEEPFAKE probability
-            (paper def: P(y=1|f), y=1 ↔ deepfake, y=0 ↔ real)
-            High p(s) → DEEPFAKE,  Low p(s) → REAL
-        """
-        # Step 1 — resize / sharpen / normalise
         target_res = (256, 256)
         processed = preprocess_frames(frames, target_shape=target_res,
                                       normalize=True, sharpen=True)
 
-        # Step 2 — MesoNet on original orientation (output: real_prob)
         preds_orig = self._run_model_on_frames(processed)
         spatial_orig_real = self._aggregate_predictions(preds_orig)
 
-        # Step 3 — TTA: horizontal flip (output: real_prob)
         flipped = np.array([np.fliplr(f) for f in processed])
         preds_flip = self._run_model_on_frames(flipped)
         spatial_flip_real = self._aggregate_predictions(preds_flip)
 
-        # Step 4 — average original + flipped (still real_prob)
         spatial_score_real = (spatial_orig_real + spatial_flip_real) / 2.0
 
-        # Step 5 — convert CNN real_prob → deepfake_prob
         p_fake_spatial = normalize_to_fake_prob(spatial_score_real, mode="real_prob")
         print(f"  [CNN] p_fake_spatial = {p_fake_spatial:.4f}  "
               f"(real_orig={spatial_orig_real:.4f}, real_flip={spatial_flip_real:.4f})")
 
-        # Step 6 — frequency domain score (uses un-normalised frames; output: real_prob)
         raw_frames = preprocess_frames(frames, target_shape=target_res,
                                        normalize=False, sharpen=False)
         freq_score_real = compute_frequency_score(raw_frames)
 
-        # Step 7 — convert frequency real_prob → deepfake_prob
         p_fake_freq = normalize_to_fake_prob(freq_score_real, mode="real_prob")
         print(f"  [FreqEnsemble] p_fake_freq = {p_fake_freq:.4f}")
 
-        # Step 8 — ensemble: p(s) = w_spatial * p_fake_spatial + w_freq * p_fake_freq
         ensemble = _SPATIAL_WEIGHT * p_fake_spatial + _FREQUENCY_WEIGHT * p_fake_freq
-        # Clamp to [0.001, 0.999] for numerical stability (Task 8)
         p_s = float(np.clip(ensemble, 0.001, 0.999))
         print(f"  [Ensemble] Final p(s) = {p_s:.4f}  "
               f"(deepfake prob; spatial×{_SPATIAL_WEIGHT} + freq×{_FREQUENCY_WEIGHT})")
         return p_s
 
     def _predict_frames_with_details(self, frames: np.ndarray, sample_rate: int = 3) -> Tuple[float, np.ndarray, np.ndarray]:
-        """
-        Enhanced prediction that returns per-frame scores and processed frames
-        Used for explainability and temporal analysis
-        
-        Args:
-            sample_rate: For temporal analysis, sample every Nth frame for speed
-        
-        Returns:
-            Tuple of (aggregated_score, per_frame_scores, processed_frames)
-        """
-        # For temporal analysis, sample frames to reduce processing time
         if sample_rate > 1 and len(frames) > 10:
             sampled_indices = np.arange(0, len(frames), sample_rate)
             frames_to_process = frames[sampled_indices]
         else:
             frames_to_process = frames
             sampled_indices = np.arange(len(frames))
-        # Step 1 — resize / sharpen / normalise
+        
         target_res = (256, 256)
         processed = preprocess_frames(frames_to_process, target_shape=target_res,
                                       normalize=True, sharpen=True)
 
-        # Step 2 — MesoNet on original orientation (keep per-frame scores)
         preds_orig = self._run_model_on_frames(processed)
-        
-        # Step 3 — TTA: horizontal flip
         flipped = np.array([np.fliplr(f) for f in processed])
         preds_flip = self._run_model_on_frames(flipped)
         
-        # Step 4 — average original + flipped per-frame (still real_prob)
         per_frame_real = (preds_orig.flatten() + preds_flip.flatten()) / 2.0
-        
-        # Step 5 — convert per-frame real_prob → deepfake_prob
         per_frame_fake = np.array([normalize_to_fake_prob(score, mode="real_prob") 
                                    for score in per_frame_real])
         
-        # If we sampled frames, expand back to original length for temporal analysis
         if sample_rate > 1 and len(frames) > 10:
-            # Interpolate scores for missing frames
             full_per_frame_fake = np.interp(
                 np.arange(len(frames)), 
                 sampled_indices, 
@@ -317,13 +210,11 @@ class AdaptivePipeline:
         else:
             full_per_frame_fake = per_frame_fake
         
-        # Step 6 — frequency domain score (aggregate only)
         raw_frames = preprocess_frames(frames_to_process, target_shape=target_res,
                                        normalize=False, sharpen=False)
         freq_score_real = compute_frequency_score(raw_frames)
         p_fake_freq = normalize_to_fake_prob(freq_score_real, mode="real_prob")
         
-        # Step 7 — aggregate spatial score (use original frames for final score)
         all_processed = preprocess_frames(frames, target_shape=target_res,
                                           normalize=True, sharpen=True)
         all_preds_orig = self._run_model_on_frames(all_processed)
@@ -335,7 +226,6 @@ class AdaptivePipeline:
         spatial_avg_real = (spatial_score_real + spatial_flip_real) / 2.0
         p_fake_spatial = normalize_to_fake_prob(spatial_avg_real, mode="real_prob")
         
-        # Step 8 — ensemble for final aggregated score
         ensemble = _SPATIAL_WEIGHT * p_fake_spatial + _FREQUENCY_WEIGHT * p_fake_freq
         p_s = float(np.clip(ensemble, 0.001, 0.999))
         
@@ -351,44 +241,20 @@ class AdaptivePipeline:
                         video_path: str, 
                         stage_number: int,
                         stage_config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process a single stage following Section IV.B formulation
-        
-        Args:
-            video_path: Path to video
-            stage_number: Stage number s
-            stage_config: Stage configuration parameters
-            
-        Returns:
-            Dictionary with stage results including confidence-based metadata
-        """
         stage_start = time.time()
         
         if PIPELINE_CONFIG['verbose']:
             print(f"\n[STAGE {stage_number}] Escalation Level: {stage_config['name']}")
             print(f"  Configuration: Res={stage_config['resolution']}, Target_FPS={stage_config['frames_per_second']}")
         
-        # Frame extraction (Section IV.C: n_s)
         with FrameExtractor(video_path) as extractor:
             frames = extractor.extract_frames_adaptive(stage_config)
             
-        # Inference and Aggregation (Section IV.B: Equation 4)
         p_s = self._predict_frames(frames)
-        
-        # Confidence Assessment (Section IV.D: Equation 19)
-        # p(s) is now deepfake probability: P(y=1|f), y=1 ↔ deepfake
-        # confidence = max(p_s, 1-p_s) — symmetric around 0.5 decision boundary
         confidence_magnitude = max(p_s, 1.0 - p_s)
-
         stage_time = time.time() - stage_start
-
-        # Early termination condition (Section IV.B: Equation 5)
-        # Exit when confidence >= tau_s (thresholds are monotone-decreasing: τ1 > τ2 > τ3)
         tau_s = stage_config['confidence_threshold']
         should_exit = (confidence_magnitude >= tau_s) or (stage_number == 3)
-
-        # Predicted Class (Equation 6 — paper definition)
-        # p(s) >= 0.5 → DEEPFAKE  |  p(s) < 0.5 → REAL
         label = "DEEPFAKE" if p_s >= 0.5 else "REAL"
 
         if PIPELINE_CONFIG['verbose']:
@@ -408,15 +274,6 @@ class AdaptivePipeline:
         }
     
     def predict(self, video_path: str) -> Dict:
-        """
-        Predict whether a video is deepfake using adaptive pipeline
-        
-        Args:
-            video_path: Path to video file
-            
-        Returns:
-            Dictionary with prediction results
-        """
         total_start = time.time()
         
         print(f"\n{'#'*70}")
@@ -424,8 +281,6 @@ class AdaptivePipeline:
         print(f"{'#'*70}")
         print(f"Video: {os.path.basename(video_path)}")
         
-        # Process each stage
-        # Initialize with placeholder to satisfy linter
         final_result: Dict[str, Any] = {'label': 'UNKNOWN', 'p_s': 0.0, 'confidence': 0.0}
         exit_stage: int = 0
         
@@ -433,31 +288,22 @@ class AdaptivePipeline:
             stage_config = get_stage_config(stage_num)
             result = self._process_stage(video_path, stage_num, stage_config)
             
-            # Update stage-specific time tracking
             self.stats['stage_times'][stage_num] += result['time']
             
-            # Check for escalation logic (Section IV.B: Escalation Logic)
             if result['should_exit']:
                 final_result = result
                 exit_stage = stage_num
-                
-                # Update exit statistics
                 self.stats[f'stage{stage_num}_exits'] += 1
                 break
         
         total_time = time.time() - total_start
-        
-        # Update global statistics
         self.stats['total_videos'] += 1
         self.stats['total_time'] += total_time
         
-        # Extract values into variables to satisfy linter (avoids complex f-string expressions)
-        # Using cast or careful access to avoid "attribute base undefined"
         f_label: str = str(final_result['label'])
         f_p_s: float = float(final_result['p_s'])
         f_conf: float = float(final_result['confidence'])
 
-        # Print final result
         print(f"\n{'='*60}")
         print(f"FINAL RESULT")
         print(f"{'='*60}")
@@ -479,15 +325,6 @@ class AdaptivePipeline:
         }
     
     def predict_batch(self, video_paths: List[str]) -> List[Dict]:
-        """
-        Predict on multiple videos
-        
-        Args:
-            video_paths: List of video paths
-            
-        Returns:
-            List of prediction results
-        """
         results = []
         
         for i, video_path in enumerate(video_paths, 1):
@@ -498,7 +335,6 @@ class AdaptivePipeline:
         return results
     
     def print_statistics(self):
-        """Print pipeline statistics"""
         if self.stats['total_videos'] == 0:
             print("No videos processed yet.")
             return
@@ -523,7 +359,6 @@ class AdaptivePipeline:
         print(f"{'='*70}\n")
     
     def reset_statistics(self):
-        """Reset statistics"""
         self.stats = {
             'total_videos': 0,
             'stage1_exits': 0,
@@ -534,16 +369,6 @@ class AdaptivePipeline:
         }
 
     def predict_with_explanation(self, video_path: str, top_k: int = 5) -> Dict:
-        """
-        Predict with Grad-CAM explainability heatmaps
-        
-        Args:
-            video_path: Path to video file
-            top_k: Number of most suspicious frames to explain
-            
-        Returns:
-            Dictionary with prediction results + heatmap explanations
-        """
         total_start = time.time()
         
         print(f"\n{'#'*70}")
@@ -551,7 +376,6 @@ class AdaptivePipeline:
         print(f"{'#'*70}")
         print(f"Video: {os.path.basename(video_path)}")
         
-        # Run through stages until exit
         final_result: Dict[str, Any] = {'label': 'UNKNOWN', 'p_s': 0.0, 'confidence': 0.0}
         exit_stage: int = 0
         all_frames: List[np.ndarray] = []
@@ -565,19 +389,15 @@ class AdaptivePipeline:
             if PIPELINE_CONFIG['verbose']:
                 print(f"\n[STAGE {stage_num}] {stage_config['name']}")
             
-            # Extract frames
             with FrameExtractor(video_path) as extractor:
                 frames = extractor.extract_frames_adaptive(stage_config)
             
-            # Get detailed predictions
             p_s, per_frame_scores, processed_frames = self._predict_frames_with_details(frames)
             
-            # Store for explanation generation
             all_frames.append(frames)
             all_processed.append(processed_frames)
             all_scores.append(per_frame_scores)
             
-            # Confidence and exit logic
             confidence_magnitude = max(p_s, 1.0 - p_s)
             tau_s = stage_config['confidence_threshold']
             should_exit = (confidence_magnitude >= tau_s) or (stage_num == 3)
@@ -604,7 +424,6 @@ class AdaptivePipeline:
         self.stats['total_videos'] += 1
         self.stats['total_time'] += total_time
         
-        # Generate explanations for the exit stage
         exit_frames = all_frames[exit_stage - 1]
         exit_processed = all_processed[exit_stage - 1]
         exit_scores = all_scores[exit_stage - 1]
@@ -645,15 +464,6 @@ class AdaptivePipeline:
         }
 
     def predict_with_temporal(self, video_path: str) -> Dict:
-        """
-        Predict with temporal consistency analysis
-        
-        Args:
-            video_path: Path to video file
-            
-        Returns:
-            Dictionary with prediction results + temporal analysis
-        """
         total_start = time.time()
         
         print(f"\n{'#'*70}")
@@ -661,7 +471,6 @@ class AdaptivePipeline:
         print(f"{'#'*70}")
         print(f"Video: {os.path.basename(video_path)}")
         
-        # Run through stages until exit
         final_result: Dict[str, Any] = {'label': 'UNKNOWN', 'p_s': 0.0, 'confidence': 0.0}
         exit_stage: int = 0
         all_frame_scores: List[float] = []
@@ -674,24 +483,19 @@ class AdaptivePipeline:
             if PIPELINE_CONFIG['verbose']:
                 print(f"\n[STAGE {stage_num}] {stage_config['name']}")
             
-            # Extract frames
             with FrameExtractor(video_path) as extractor:
                 frames = extractor.extract_frames_adaptive(stage_config)
                 video_info = extractor.get_video_info()
             
-            # Get detailed predictions
             p_s, per_frame_scores, _ = self._predict_frames_with_details(frames)
             
-            # Calculate timestamps based on frame extraction rate
             fps = stage_config['frames_per_second']
             duration = video_info.get('duration', len(frames) / fps)
             timestamps = np.linspace(0, duration, len(per_frame_scores))
             
-            # Store for temporal analysis
             all_frame_scores.extend(per_frame_scores.tolist())
             all_timestamps.extend(timestamps.tolist())
             
-            # Confidence and exit logic
             confidence_magnitude = max(p_s, 1.0 - p_s)
             tau_s = stage_config['confidence_threshold']
             should_exit = (confidence_magnitude >= tau_s) or (stage_num == 3)
@@ -718,7 +522,6 @@ class AdaptivePipeline:
         self.stats['total_videos'] += 1
         self.stats['total_time'] += total_time
         
-        # Perform temporal analysis
         print(f"\n[Temporal] Analyzing frame-to-frame consistency...")
         temporal_analysis = analyze_temporal_consistency(
             np.array(all_frame_scores),
@@ -758,14 +561,10 @@ class AdaptivePipeline:
 
 
 if __name__ == "__main__":
-    # Test pipeline
     print("Adaptive Pipeline Module - Test Mode")
     print("=" * 70)
     
-    # Print configuration
     print_config()
-    
-    # Create pipeline
     pipeline = AdaptivePipeline()
     
     print("\n✓ Pipeline initialized successfully!")
